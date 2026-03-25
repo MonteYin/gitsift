@@ -15,9 +15,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
           - target: aarch64-apple-darwin
@@ -34,17 +35,10 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Install OpenSSL (native Linux)
-        if: runner.os == 'Linux' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            OPENSSL_STATIC=1 \
-            OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu \
-            OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }} --features vendored-openssl
           else
             cargo build --release --target ${{ matrix.target }}
           fi
