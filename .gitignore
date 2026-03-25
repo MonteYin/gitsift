@@ -18,6 +18,9 @@ Thumbs.db
 .claude/
 CLAUDE.md
 
+# Test
+test-folder/
+
 # Local config
 .env
 *.local

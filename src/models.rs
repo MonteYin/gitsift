@@ -148,7 +148,6 @@ pub struct StatusSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
 
     // --- HunkLine round-trip ---
 
@@ -199,18 +198,36 @@ mod tests {
     #[test]
     fn linetag_json_values() {
         assert_eq!(serde_json::to_string(&LineTag::Equal).unwrap(), "\"equal\"");
-        assert_eq!(serde_json::to_string(&LineTag::Insert).unwrap(), "\"insert\"");
-        assert_eq!(serde_json::to_string(&LineTag::Delete).unwrap(), "\"delete\"");
+        assert_eq!(
+            serde_json::to_string(&LineTag::Insert).unwrap(),
+            "\"insert\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LineTag::Delete).unwrap(),
+            "\"delete\""
+        );
     }
 
     // --- FileStatus JSON values ---
 
     #[test]
     fn filestatus_json_values() {
-        assert_eq!(serde_json::to_string(&FileStatus::Modified).unwrap(), "\"modified\"");
-        assert_eq!(serde_json::to_string(&FileStatus::Added).unwrap(), "\"added\"");
-        assert_eq!(serde_json::to_string(&FileStatus::Deleted).unwrap(), "\"deleted\"");
-        assert_eq!(serde_json::to_string(&FileStatus::Renamed).unwrap(), "\"renamed\"");
+        assert_eq!(
+            serde_json::to_string(&FileStatus::Modified).unwrap(),
+            "\"modified\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileStatus::Added).unwrap(),
+            "\"added\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileStatus::Deleted).unwrap(),
+            "\"deleted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileStatus::Renamed).unwrap(),
+            "\"renamed\""
+        );
     }
 
     // --- Hunk round-trip ---

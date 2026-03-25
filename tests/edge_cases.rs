@@ -32,7 +32,7 @@ fn gitsift() -> Command {
 }
 
 fn parse_json(stdout: &[u8]) -> serde_json::Value {
-    serde_json::from_str(&String::from_utf8(stdout.to_vec()).unwrap()).unwrap()
+    serde_json::from_slice(stdout).unwrap()
 }
 
 // ===== Binary files =====
@@ -270,9 +270,8 @@ fn protocol_session_diff_stage_status_diff() {
         .unwrap();
 
     // Step 2: stage via protocol
-    let stage_stdin = format!(
-        "{{\"method\": \"stage\", \"params\": {{\"hunk_ids\": [\"{hunk_id}\"]}}}}\n"
-    );
+    let stage_stdin =
+        format!("{{\"method\": \"stage\", \"params\": {{\"hunk_ids\": [\"{hunk_id}\"]}}}}\n");
     let stage_out = gitsift()
         .args(["protocol", "--repo"])
         .arg(dir.path())

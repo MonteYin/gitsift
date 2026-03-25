@@ -46,7 +46,11 @@ pub fn print_diff(output: &DiffOutput, format: &OutputFormat) {
                 }
                 println!();
             }
-            println!("Total: {} file(s), {} hunk(s)", output.files.len(), output.total_hunks);
+            println!(
+                "Total: {} file(s), {} hunk(s)",
+                output.files.len(),
+                output.total_hunks
+            );
         }
         OutputFormat::Auto => unreachable!("resolve_format always resolves Auto"),
     }
