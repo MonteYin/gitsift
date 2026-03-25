@@ -274,6 +274,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
         // Separate untracked file hunks from tracked file hunks.
         let mut untracked_paths: Vec<String> = Vec::new();
+        let mut untracked_hunk_count = 0usize;
         let mut tracked_ids: HashSet<String> = HashSet::new();
 
         for req_id in &unique_requested {
@@ -287,6 +288,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                     if !untracked_paths.contains(path) {
                         untracked_paths.push(path.clone());
                     }
+                    untracked_hunk_count += 1;
                 }
                 Some((_, false)) => {
                     tracked_ids.insert(req_id.to_string());
@@ -295,23 +297,12 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         }
 
         // Stage untracked files directly
-        let untracked_staged = stage_untracked_files(&repo, &untracked_paths)?;
-        staged += untracked_staged;
+        stage_untracked_files(&repo, &untracked_paths)?;
+        staged += untracked_hunk_count;
 
-        // For tracked hunks, add untracked files to index first so apply() doesn't choke,
-        // then apply with hunk filtering.
+        // For tracked hunks, generate a diff WITHOUT untracked files and apply.
         if !tracked_ids.is_empty() {
-            // Add any remaining untracked files to index to prevent apply() failure
-            let all_untracked: Vec<String> = hunk_metadata
-                .values()
-                .filter(|(_, is_untracked)| *is_untracked)
-                .map(|(path, _)| path.clone())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            stage_untracked_files(&repo, &all_untracked)?;
-
-            // Re-generate diff (now untracked files are in index)
+            // Diff excludes untracked files — apply() only sees tracked changes
             let mut opts = DiffOptions::new();
             opts.context_lines(3);
 
@@ -403,6 +394,16 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
     // apply because prior applies modify the index, shifting line positions.
     if !request.line_selections.is_empty() {
         for sel in &request.line_selections {
+            // Check if this hunk belongs to an untracked file
+            if let Some((_, true)) = hunk_metadata.get(&sel.hunk_id) {
+                errors.push(format!(
+                    "line-level staging not supported for untracked files (hunk {}); use git add or hunk-level staging instead",
+                    sel.hunk_id
+                ));
+                failed += 1;
+                continue;
+            }
+
             // Re-collect hunks from the current (potentially modified) index state
             let hunks = collect_hunks(&repo)?;
 
@@ -952,6 +953,14 @@ mod tests {
         assert!(result.errors.is_empty());
 
         assert!(count_staged_hunks(&repo) >= 1);
+
+        // Verify untracked file is NOT in the index (not silently staged)
+        let fresh_repo = Repository::open(dir.path()).unwrap();
+        let index = fresh_repo.index().unwrap();
+        assert!(
+            index.get_path(Path::new("new_file.txt"), 0).is_none(),
+            "untracked file should NOT be in index when only tracked hunk was staged"
+        );
     }
 
     #[test]
