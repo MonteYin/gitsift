@@ -48,11 +48,14 @@ The JSON structure looks like this:
       "status": "modified",
       "hunks": [{
         "id": "59a9050fd4195c94",
+        "file_path": "src/lib.rs",
+        "old_start": 1, "old_lines": 5,
+        "new_start": 1, "new_lines": 7,
         "header": "@@ -1,5 +1,7 @@",
         "lines": [
-          {"tag": "equal",  "content": " unchanged\n", "old_lineno": 1, "new_lineno": 1},
-          {"tag": "delete", "content": "old line\n",   "old_lineno": 2},
-          {"tag": "insert", "content": "new line\n",   "new_lineno": 2}
+          {"tag": "equal",  "content": "unchanged line\n", "old_lineno": 1, "new_lineno": 1},
+          {"tag": "delete", "content": "old line\n",       "old_lineno": 2},
+          {"tag": "insert", "content": "new line\n",       "new_lineno": 2}
         ]
       }]
     }],
@@ -60,6 +63,8 @@ The JSON structure looks like this:
   }
 }
 ```
+
+Note: `content` contains the raw line text without any diff prefix characters (no `+`, `-`, or space prefix).
 
 ### 3. Stage by hunk
 
@@ -97,6 +102,22 @@ git commit -m "your message"
 ```
 
 If there are more changes to stage for a second commit, go back to step 1 — you need to re-diff because hunk IDs change after staging.
+
+## Protocol Mode (persistent sessions)
+
+For long-running agent sessions, use `gitsift protocol` to avoid process startup overhead. Send JSON requests on stdin, receive JSON responses on stdout:
+
+```bash
+gitsift protocol --repo .
+```
+
+```json
+{"method": "diff", "params": {"file": "src/main.rs"}}
+{"method": "stage", "params": {"hunk_ids": ["abc123"]}}
+{"method": "status"}
+```
+
+Each response is a single JSON line with the same `Response` envelope. Errors (invalid JSON, unknown method) return `{"ok": false, "error": "..."}` without crashing the process.
 
 ## Gotchas
 
