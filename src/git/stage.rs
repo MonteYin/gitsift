@@ -246,8 +246,18 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
             let mut apply_opts = ApplyOptions::new();
             apply_opts.delta_callback(|delta| {
-                let path = delta
-                    .and_then(|d| d.new_file().path().or_else(|| d.old_file().path()))
+                let d = match delta {
+                    Some(d) => d,
+                    None => return false,
+                };
+                // Skip binary files
+                if d.new_file().is_binary() || d.old_file().is_binary() {
+                    return false;
+                }
+                let path = d
+                    .new_file()
+                    .path()
+                    .or_else(|| d.old_file().path())
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 *current_path.borrow_mut() = path;
