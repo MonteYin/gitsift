@@ -71,12 +71,15 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
     let available_ids = available_ids.into_inner();
 
+    // Deduplicate requested IDs at input boundary to avoid phantom failures.
+    let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
+
     let mut errors = Vec::new();
     let mut valid_ids: HashSet<String> = HashSet::new();
 
-    for req_id in &request.hunk_ids {
-        if available_ids.contains(req_id.as_str()) {
-            valid_ids.insert(req_id.clone());
+    for req_id in &unique_requested {
+        if available_ids.contains(*req_id) {
+            valid_ids.insert(req_id.to_string());
         } else {
             errors.push(format!("hunk ID not found: {req_id}"));
         }
@@ -85,7 +88,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
     if valid_ids.is_empty() {
         return Ok(StageResult {
             staged: 0,
-            failed: request.hunk_ids.len(),
+            failed: unique_requested.len(),
             errors,
         });
     }
@@ -124,7 +127,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         .context("failed to apply selected hunks to index")?;
 
     let staged = staged_count.get();
-    let failed = request.hunk_ids.len() - staged;
+    let failed = unique_requested.len() - staged;
 
     Ok(StageResult {
         staged,
@@ -276,6 +279,26 @@ mod tests {
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 1);
         assert!(result.errors.iter().any(|e| e.contains("bad_id")));
+
+        assert_eq!(count_staged_hunks(&repo), 1);
+    }
+
+    #[test]
+    fn stage_duplicate_hunk_ids() {
+        let (dir, repo) = setup_two_hunk_repo();
+
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let first_id = output.files[0].hunks[0].id.clone();
+
+        // Pass the same ID twice — should deduplicate, not produce phantom failure
+        let request = StageRequest {
+            hunk_ids: vec![first_id.clone(), first_id],
+            line_selections: vec![],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 1);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
 
         assert_eq!(count_staged_hunks(&repo), 1);
     }
