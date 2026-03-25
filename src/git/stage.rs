@@ -989,4 +989,44 @@ mod tests {
         let index_content = read_index_content(dir.path(), "brand_new.py");
         assert_eq!(index_content, "print('hello')\n");
     }
+
+    #[test]
+    fn stage_mixed_tracked_and_untracked_hunks() {
+        let (dir, _repo) = setup_two_hunk_repo();
+
+        // Create untracked file
+        fs::write(dir.path().join("new.txt"), "new content\n").unwrap();
+
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let tracked_id = output
+            .files
+            .iter()
+            .find(|f| f.path == "file.txt")
+            .unwrap()
+            .hunks[0]
+            .id
+            .clone();
+        let untracked_id = output
+            .files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .unwrap()
+            .hunks[0]
+            .id
+            .clone();
+
+        // Stage both in one request
+        let request = StageRequest {
+            hunk_ids: vec![tracked_id, untracked_id],
+            line_selections: vec![],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 2);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
+
+        // Both files should be in index
+        let new_content = read_index_content(dir.path(), "new.txt");
+        assert_eq!(new_content, "new content\n");
+    }
 }
