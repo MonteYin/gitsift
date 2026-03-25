@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{ApplyLocation, ApplyOptions, Diff, DiffOptions, Repository};
+use git2::{ApplyLocation, ApplyOptions, Delta, Diff, DiffOptions, Repository};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -12,6 +12,69 @@ use crate::models::{HunkLine, LineTag, StageRequest, StageResult};
 /// Check if a git2 DiffDelta represents a binary file.
 fn is_binary_delta(delta: &git2::DiffDelta) -> bool {
     delta.new_file().is_binary() || delta.old_file().is_binary()
+}
+
+/// Scan the diff and return a map of hunk_id → (file_path, is_untracked).
+fn scan_hunk_metadata(repo: &Repository) -> Result<HashMap<String, (String, bool)>> {
+    let mut opts = DiffOptions::new();
+    opts.context_lines(3);
+    opts.include_untracked(true);
+    opts.show_untracked_content(true);
+
+    let diff = repo
+        .diff_index_to_workdir(None, Some(&mut opts))
+        .context("failed to generate diff")?;
+
+    let metadata: RefCell<HashMap<String, (String, bool)>> = RefCell::new(HashMap::new());
+    let current: RefCell<(String, bool)> = RefCell::new((String::new(), false));
+
+    diff.foreach(
+        &mut |delta, _| {
+            if is_binary_delta(&delta) {
+                *current.borrow_mut() = (String::new(), false);
+                return true;
+            }
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let untracked = delta.status() == Delta::Untracked;
+            *current.borrow_mut() = (path, untracked);
+            true
+        },
+        None,
+        Some(&mut |_delta, hunk| {
+            let cur = current.borrow();
+            let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+            let id = hunk_id(&cur.0, hunk.old_start(), &header);
+            metadata
+                .borrow_mut()
+                .insert(id, (cur.0.clone(), cur.1));
+            true
+        }),
+        None,
+    )
+    .context("failed to scan hunk metadata")?;
+
+    Ok(metadata.into_inner())
+}
+
+/// Stage untracked files by adding them to the index directly.
+/// Returns number of files staged.
+fn stage_untracked_files(repo: &Repository, paths: &[String]) -> Result<usize> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let mut index = repo.index().context("failed to open index")?;
+    for path in paths {
+        index
+            .add_path(Path::new(path))
+            .with_context(|| format!("failed to add untracked file to index: {path}"))?;
+    }
+    index.write().context("failed to write index")?;
+    Ok(paths.len())
 }
 
 /// Collected hunk data from a diff, used for patch reconstruction.
@@ -197,102 +260,141 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
     let repo = Repository::open(repo_path).context("failed to open git repository")?;
 
+    // Build metadata: which hunks exist and which belong to untracked files.
+    let hunk_metadata = scan_hunk_metadata(&repo)?;
+
     let mut staged = 0usize;
     let mut failed = 0usize;
     let mut errors = Vec::new();
 
     // --- Hunk-level staging ---
     if !request.hunk_ids.is_empty() {
-        let mut opts = DiffOptions::new();
-        opts.context_lines(3);
-        opts.include_untracked(true);
-        opts.show_untracked_content(true);
+        let unique_requested: HashSet<&str> =
+            request.hunk_ids.iter().map(|s| s.as_str()).collect();
 
-        let diff = repo
-            .diff_index_to_workdir(None, Some(&mut opts))
-            .context("failed to generate diff")?;
+        // Separate untracked file hunks from tracked file hunks.
+        let mut untracked_paths: Vec<String> = Vec::new();
+        let mut tracked_ids: HashSet<String> = HashSet::new();
 
-        // Scan available IDs
-        let available_ids: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-        let scan_path = RefCell::new(String::new());
-
-        diff.foreach(
-            &mut |delta, _| {
-                // Clear path for binary files so no hunk IDs are generated for them
-                if is_binary_delta(&delta) {
-                    *scan_path.borrow_mut() = String::new();
-                } else {
-                    let path = delta
-                        .new_file()
-                        .path()
-                        .or_else(|| delta.old_file().path())
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    *scan_path.borrow_mut() = path;
-                }
-                true
-            },
-            None,
-            Some(&mut |_delta, hunk| {
-                let path = scan_path.borrow();
-                let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
-                let id = hunk_id(&path, hunk.old_start(), &header);
-                available_ids.borrow_mut().insert(id);
-                true
-            }),
-            None,
-        )
-        .context("failed to scan diff for hunk IDs")?;
-
-        let available_ids = available_ids.into_inner();
-        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
-
-        let mut valid_ids: HashSet<String> = HashSet::new();
         for req_id in &unique_requested {
-            if available_ids.contains(*req_id) {
-                valid_ids.insert(req_id.to_string());
-            } else {
-                errors.push(format!("hunk ID not found: {req_id}"));
-                failed += 1;
+            match hunk_metadata.get(*req_id) {
+                None => {
+                    errors.push(format!("hunk ID not found: {req_id}"));
+                    failed += 1;
+                }
+                Some((path, true)) => {
+                    // Untracked file — stage via git add
+                    if !untracked_paths.contains(path) {
+                        untracked_paths.push(path.clone());
+                    }
+                }
+                Some((_, false)) => {
+                    tracked_ids.insert(req_id.to_string());
+                }
             }
         }
 
-        if !valid_ids.is_empty() {
-            let current_path = RefCell::new(String::new());
+        // Stage untracked files directly
+        let untracked_staged = stage_untracked_files(&repo, &untracked_paths)?;
+        staged += untracked_staged;
 
-            let mut apply_opts = ApplyOptions::new();
-            apply_opts.delta_callback(|delta| {
-                let d = match delta {
-                    Some(d) => d,
-                    None => return false,
-                };
-                if is_binary_delta(&d) {
-                    return false;
-                }
-                let path = d
-                    .new_file()
-                    .path()
-                    .or_else(|| d.old_file().path())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                *current_path.borrow_mut() = path;
-                true
-            });
-            apply_opts.hunk_callback(|hunk| {
-                let hunk = match hunk {
-                    Some(h) => h,
-                    None => return false,
-                };
-                let path = current_path.borrow();
-                let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
-                let id = hunk_id(&path, hunk.old_start(), &header);
-                valid_ids.contains(&id)
-            });
+        // For tracked hunks, add untracked files to index first so apply() doesn't choke,
+        // then apply with hunk filtering.
+        if !tracked_ids.is_empty() {
+            // Add any remaining untracked files to index to prevent apply() failure
+            let all_untracked: Vec<String> = hunk_metadata
+                .values()
+                .filter(|(_, is_untracked)| *is_untracked)
+                .map(|(path, _)| path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            stage_untracked_files(&repo, &all_untracked)?;
 
-            repo.apply(&diff, ApplyLocation::Index, Some(&mut apply_opts))
-                .context("failed to apply selected hunks to index")?;
+            // Re-generate diff (now untracked files are in index)
+            let mut opts = DiffOptions::new();
+            opts.context_lines(3);
 
-            staged += valid_ids.len();
+            let diff = repo
+                .diff_index_to_workdir(None, Some(&mut opts))
+                .context("failed to generate diff")?;
+
+            // Scan available IDs from the new diff (tracked files only now)
+            let available_ids: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+            let scan_path = RefCell::new(String::new());
+
+            diff.foreach(
+                &mut |delta, _| {
+                    if is_binary_delta(&delta) {
+                        *scan_path.borrow_mut() = String::new();
+                    } else {
+                        let path = delta
+                            .new_file()
+                            .path()
+                            .or_else(|| delta.old_file().path())
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        *scan_path.borrow_mut() = path;
+                    }
+                    true
+                },
+                None,
+                Some(&mut |_delta, hunk| {
+                    let path = scan_path.borrow();
+                    let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+                    let id = hunk_id(&path, hunk.old_start(), &header);
+                    available_ids.borrow_mut().insert(id);
+                    true
+                }),
+                None,
+            )
+            .context("failed to scan diff for hunk IDs")?;
+
+            // Filter tracked_ids to only those that exist in the new diff
+            let available_ids = available_ids.into_inner();
+            let valid_ids: HashSet<String> = tracked_ids
+                .iter()
+                .filter(|id| available_ids.contains(id.as_str()))
+                .cloned()
+                .collect();
+
+            if !valid_ids.is_empty() {
+                let current_path = RefCell::new(String::new());
+
+                let mut apply_opts = ApplyOptions::new();
+                apply_opts.delta_callback(|delta| {
+                    let d = match delta {
+                        Some(d) => d,
+                        None => return false,
+                    };
+                    if is_binary_delta(&d) {
+                        return false;
+                    }
+                    let path = d
+                        .new_file()
+                        .path()
+                        .or_else(|| d.old_file().path())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    *current_path.borrow_mut() = path;
+                    true
+                });
+                apply_opts.hunk_callback(|hunk| {
+                    let hunk = match hunk {
+                        Some(h) => h,
+                        None => return false,
+                    };
+                    let path = current_path.borrow();
+                    let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+                    let id = hunk_id(&path, hunk.old_start(), &header);
+                    valid_ids.contains(&id)
+                });
+
+                repo.apply(&diff, ApplyLocation::Index, Some(&mut apply_opts))
+                    .context("failed to apply selected hunks to index")?;
+
+                staged += valid_ids.len();
+            }
         }
     }
 
@@ -818,5 +920,64 @@ mod tests {
         let index_content = read_index_content(dir.path(), "code.txt");
         let working_content = fs::read_to_string(dir.path().join("code.txt")).unwrap();
         assert_eq!(index_content, working_content);
+    }
+
+    // ===== Untracked files (GTST-18) =====
+
+    #[test]
+    fn stage_with_untracked_files_present() {
+        let (dir, repo) = setup_two_hunk_repo();
+
+        // Add an untracked file alongside tracked changes
+        fs::write(dir.path().join("new_file.txt"), "brand new\n").unwrap();
+
+        // Should be able to stage tracked file hunks despite untracked file
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let tracked_hunk = output
+            .files
+            .iter()
+            .find(|f| f.path == "file.txt")
+            .unwrap()
+            .hunks[0]
+            .id
+            .clone();
+
+        let request = StageRequest {
+            hunk_ids: vec![tracked_hunk],
+            line_selections: vec![],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 1);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
+
+        assert!(count_staged_hunks(&repo) >= 1);
+    }
+
+    #[test]
+    fn stage_untracked_file_hunk_directly() {
+        let (dir, _repo) = setup_two_hunk_repo();
+
+        // Create untracked file
+        fs::write(dir.path().join("brand_new.py"), "print('hello')\n").unwrap();
+
+        // Get hunk ID for the untracked file
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let new_file = output.files.iter().find(|f| f.path == "brand_new.py");
+        assert!(new_file.is_some(), "untracked file should appear in diff");
+        let new_hunk_id = new_file.unwrap().hunks[0].id.clone();
+
+        // Should be able to stage the untracked file's hunk
+        let request = StageRequest {
+            hunk_ids: vec![new_hunk_id],
+            line_selections: vec![],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 1);
+        assert_eq!(result.failed, 0);
+
+        // Verify file is staged
+        let index_content = read_index_content(dir.path(), "brand_new.py");
+        assert_eq!(index_content, "print('hello')\n");
     }
 }
