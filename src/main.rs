@@ -32,11 +32,11 @@ fn main() -> Result<()> {
                 }
             };
             let result = git::stage::stage_selection(&cli.repo, &request)?;
-            println!("{}", serde_json::to_string(&models::Response::success(result))?);
+            output::print_stage_result(&result, &cli.format);
         }
         Commands::Status => {
             let status = git::status::get_status(&cli.repo)?;
-            println!("{}", serde_json::to_string(&models::Response::success(status))?);
+            output::print_status(&status, &cli.format);
         }
         Commands::Protocol => {
             protocol::run_protocol(&cli.repo)?;
