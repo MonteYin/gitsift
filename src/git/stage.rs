@@ -49,9 +49,7 @@ fn scan_hunk_metadata(repo: &Repository) -> Result<HashMap<String, (String, bool
             let cur = current.borrow();
             let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
             let id = hunk_id(&cur.0, hunk.old_start(), &header);
-            metadata
-                .borrow_mut()
-                .insert(id, (cur.0.clone(), cur.1));
+            metadata.borrow_mut().insert(id, (cur.0.clone(), cur.1));
             true
         }),
         None,
@@ -269,8 +267,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
     // --- Hunk-level staging ---
     if !request.hunk_ids.is_empty() {
-        let unique_requested: HashSet<&str> =
-            request.hunk_ids.iter().map(|s| s.as_str()).collect();
+        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
 
         // Separate untracked file hunks from tracked file hunks.
         let mut untracked_paths: Vec<String> = Vec::new();
