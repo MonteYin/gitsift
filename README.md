@@ -12,7 +12,19 @@ Git hunk sifter for code agents. A selective staging tool (`git add -p` replacem
 
 ## Install
 
-### macOS (Homebrew)
+### Shell script (Linux & macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MonteYin/gitsift/main/install.sh | bash
+```
+
+Custom install directory:
+
+```bash
+INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/MonteYin/gitsift/main/install.sh | bash
+```
+
+### Homebrew (macOS)
 
 ```bash
 brew tap MonteYin/tap
