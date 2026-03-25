@@ -252,7 +252,10 @@ mod tests {
         // Must have hunks with actual content (not empty)
         assert!(!new_file.hunks.is_empty(), "added file must have hunks");
         assert!(
-            new_file.hunks[0].lines.iter().any(|l| l.tag == LineTag::Insert),
+            new_file.hunks[0]
+                .lines
+                .iter()
+                .any(|l| l.tag == LineTag::Insert),
             "added file hunk must have insert lines"
         );
     }
@@ -373,7 +376,10 @@ mod tests {
             .find(|l| l.tag == LineTag::Insert && l.content.contains("INSERTED"))
             .expect("should find inserted line");
 
-        assert!(inserted.old_lineno.is_none(), "insert has no old line number");
+        assert!(
+            inserted.old_lineno.is_none(),
+            "insert has no old line number"
+        );
         assert!(inserted.new_lineno.is_some(), "insert has new line number");
     }
 }

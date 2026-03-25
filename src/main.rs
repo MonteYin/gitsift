@@ -13,10 +13,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Diff { file } => {
-            let diff = git::diff::diff_unstaged(
-                &cli.repo,
-                file.as_ref().and_then(|f| f.to_str()),
-            )?;
+            let diff = git::diff::diff_unstaged(&cli.repo, file.as_ref().and_then(|f| f.to_str()))?;
             output::print_diff(&diff, &cli.format);
         }
         Commands::Stage {

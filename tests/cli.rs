@@ -169,14 +169,7 @@ fn stage_invalid_id() {
     fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
 
     let output = gitsift()
-        .args([
-            "stage",
-            "--hunk-ids",
-            "bogus",
-            "--format",
-            "json",
-            "--repo",
-        ])
+        .args(["stage", "--hunk-ids", "bogus", "--format", "json", "--repo"])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -244,7 +237,11 @@ fn help_shows_subcommands() {
 #[test]
 fn full_workflow_diff_stage_status() {
     let dir = setup_repo();
-    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\nnew line\n").unwrap();
+    fs::write(
+        dir.path().join("hello.txt"),
+        "line 1\nchanged\nline 3\nnew line\n",
+    )
+    .unwrap();
 
     // 1. Diff
     let diff_out = gitsift()

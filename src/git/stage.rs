@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::diff::hunk_id;
-use crate::models::{HunkLine, LineSelection, LineTag, StageRequest, StageResult};
+#[cfg(test)]
+use crate::models::LineSelection;
+use crate::models::{HunkLine, LineTag, StageRequest, StageResult};
 
 /// Check if a git2 DiffDelta represents a binary file.
 fn is_binary_delta(delta: &git2::DiffDelta) -> bool {
@@ -155,10 +157,10 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
                 old_lineno: line.old_lineno(),
                 new_lineno: line.new_lineno(),
             };
-            if let Some(id) = s.current_hunk_id.clone() {
-                if let Some(raw) = s.hunks.get_mut(&id) {
-                    raw.lines.push(hunk_line);
-                }
+            if let Some(id) = s.current_hunk_id.clone()
+                && let Some(raw) = s.hunks.get_mut(&id)
+            {
+                raw.lines.push(hunk_line);
             }
             true
         }),
@@ -243,8 +245,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         .context("failed to scan diff for hunk IDs")?;
 
         let available_ids = available_ids.into_inner();
-        let unique_requested: HashSet<&str> =
-            request.hunk_ids.iter().map(|s| s.as_str()).collect();
+        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
 
         let mut valid_ids: HashSet<String> = HashSet::new();
         for req_id in &unique_requested {
@@ -319,10 +320,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                             .unwrap_or(false)
                     });
                     if !has_change {
-                        errors.push(format!(
-                            "no change lines selected for hunk {}",
-                            sel.hunk_id
-                        ));
+                        errors.push(format!("no change lines selected for hunk {}", sel.hunk_id));
                         failed += 1;
                         continue;
                     }
@@ -428,9 +426,7 @@ mod tests {
 
     fn count_staged_hunks(repo: &Repository) -> usize {
         let head = repo.head().unwrap().peel_to_tree().unwrap();
-        let diff = repo
-            .diff_tree_to_index(Some(&head), None, None)
-            .unwrap();
+        let diff = repo.diff_tree_to_index(Some(&head), None, None).unwrap();
         let mut count = 0;
         diff.foreach(
             &mut |_, _| true,

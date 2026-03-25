@@ -10,11 +10,8 @@ const MAX_LINE_LENGTH: usize = 10 * 1024 * 1024;
 
 /// Write a JSON response line to stdout and flush.
 /// Returns Err on write failure (broken pipe, etc.) to signal loop exit.
-fn write_response<T: serde::Serialize>(
-    out: &mut impl Write,
-    resp: &Response<T>,
-) -> io::Result<()> {
-    serde_json::to_writer(&mut *out, resp).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+fn write_response<T: serde::Serialize>(out: &mut impl Write, resp: &Response<T>) -> io::Result<()> {
+    serde_json::to_writer(&mut *out, resp).map_err(io::Error::other)?;
     out.write_all(b"\n")?;
     out.flush()
 }
@@ -23,7 +20,10 @@ fn write_response<T: serde::Serialize>(
 /// Returns None on EOF, Some(Err) on read error, Some(Ok(bytes)) on success.
 fn read_line_bytes(reader: &mut impl BufRead) -> Option<io::Result<Vec<u8>>> {
     let mut buf = Vec::new();
-    match reader.take(MAX_LINE_LENGTH as u64).read_until(b'\n', &mut buf) {
+    match reader
+        .take(MAX_LINE_LENGTH as u64)
+        .read_until(b'\n', &mut buf)
+    {
         Ok(0) => None, // EOF
         Ok(_) => {
             // Strip trailing newline

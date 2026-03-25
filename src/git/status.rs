@@ -10,9 +10,7 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
 
     // Staged: diff between HEAD tree and index
     let (staged_files, staged_hunks) = if let Ok(head) = repo.head() {
-        let tree = head
-            .peel_to_tree()
-            .context("failed to peel HEAD to tree")?;
+        let tree = head.peel_to_tree().context("failed to peel HEAD to tree")?;
         let diff = repo
             .diff_tree_to_index(Some(&tree), None, None)
             .context("failed to diff tree to index")?;

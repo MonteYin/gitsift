@@ -33,7 +33,7 @@ fn parse_response_lines(stdout: &str) -> Vec<serde_json::Value> {
     stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect(&format!("invalid JSON line: {l}")))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|_| panic!("invalid JSON line: {l}")))
         .collect()
 }
 
@@ -112,7 +112,12 @@ fn protocol_invalid_json() {
     let responses = parse_response_lines(&String::from_utf8(output.stdout).unwrap());
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["ok"], false);
-    assert!(responses[0]["error"].as_str().unwrap().contains("invalid request"));
+    assert!(
+        responses[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid request")
+    );
 }
 
 #[test]
@@ -197,9 +202,8 @@ fn protocol_full_workflow_diff_stage_status() {
         .unwrap();
 
     // Step 2: stage that hunk
-    let stage_stdin = format!(
-        "{{\"method\": \"stage\", \"params\": {{\"hunk_ids\": [\"{hunk_id}\"]}}}}\n"
-    );
+    let stage_stdin =
+        format!("{{\"method\": \"stage\", \"params\": {{\"hunk_ids\": [\"{hunk_id}\"]}}}}\n");
     let stage_output = gitsift()
         .args(["protocol", "--repo"])
         .arg(dir.path())
