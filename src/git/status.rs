@@ -16,7 +16,7 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
         let diff = repo
             .diff_tree_to_index(Some(&tree), None, None)
             .context("failed to diff tree to index")?;
-        count_files_and_hunks(&diff)
+        count_files_and_hunks(&diff)?
     } else {
         // No HEAD (empty repo) — check if index has any entries
         let index = repo.index().context("failed to read index")?;
@@ -27,7 +27,7 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
             let diff = repo
                 .diff_tree_to_index(None, None, None)
                 .context("failed to diff empty tree to index")?;
-            count_files_and_hunks(&diff)
+            count_files_and_hunks(&diff)?
         }
     };
 
@@ -39,7 +39,7 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
     let unstaged_diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .context("failed to diff index to workdir")?;
-    let (unstaged_files, unstaged_hunks) = count_files_and_hunks(&unstaged_diff);
+    let (unstaged_files, unstaged_hunks) = count_files_and_hunks(&unstaged_diff)?;
 
     Ok(StatusSummary {
         staged_files,
@@ -49,7 +49,7 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
     })
 }
 
-fn count_files_and_hunks(diff: &git2::Diff) -> (usize, usize) {
+fn count_files_and_hunks(diff: &git2::Diff) -> Result<(usize, usize)> {
     let mut files = 0usize;
     let mut hunks = 0usize;
     diff.foreach(
@@ -64,8 +64,8 @@ fn count_files_and_hunks(diff: &git2::Diff) -> (usize, usize) {
         }),
         None,
     )
-    .unwrap_or(());
-    (files, hunks)
+    .context("failed to iterate diff for status counts")?;
+    Ok((files, hunks))
 }
 
 #[cfg(test)]
