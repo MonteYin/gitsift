@@ -1,6 +1,6 @@
 [package]
 name = "gitsift"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Git hunk sifter for code agents"
 license = "MIT"
