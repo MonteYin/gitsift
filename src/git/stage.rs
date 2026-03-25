@@ -7,6 +7,11 @@ use std::path::Path;
 use super::diff::hunk_id;
 use crate::models::{HunkLine, LineSelection, LineTag, StageRequest, StageResult};
 
+/// Check if a git2 DiffDelta represents a binary file.
+fn is_binary_delta(delta: &git2::DiffDelta) -> bool {
+    delta.new_file().is_binary() || delta.old_file().is_binary()
+}
+
 /// Collected hunk data from a diff, used for patch reconstruction.
 struct RawHunk {
     file_path: String,
@@ -108,13 +113,18 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
     diff.foreach(
         &mut |delta, _| {
             let mut s = state.borrow_mut();
-            s.current_path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            s.current_hunk_id = None;
+            if is_binary_delta(&delta) {
+                s.current_path.clear();
+                s.current_hunk_id = None;
+            } else {
+                s.current_path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                s.current_hunk_id = None;
+            }
             true
         },
         None,
@@ -206,13 +216,18 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
         diff.foreach(
             &mut |delta, _| {
-                let path = delta
-                    .new_file()
-                    .path()
-                    .or_else(|| delta.old_file().path())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                *scan_path.borrow_mut() = path;
+                // Clear path for binary files so no hunk IDs are generated for them
+                if is_binary_delta(&delta) {
+                    *scan_path.borrow_mut() = String::new();
+                } else {
+                    let path = delta
+                        .new_file()
+                        .path()
+                        .or_else(|| delta.old_file().path())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    *scan_path.borrow_mut() = path;
+                }
                 true
             },
             None,
@@ -250,8 +265,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                     Some(d) => d,
                     None => return false,
                 };
-                // Skip binary files
-                if d.new_file().is_binary() || d.old_file().is_binary() {
+                if is_binary_delta(&d) {
                     return false;
                 }
                 let path = d

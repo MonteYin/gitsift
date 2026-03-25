@@ -181,7 +181,7 @@ fn stage_from_stdin_json() {
 #[test]
 fn multi_file_selective_staging() {
     let dir = setup_repo();
-    let repo = Repository::init(dir.path()).unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
     let sig = Signature::now("test", "test@test.com").unwrap();
 
     // Add a second file
