@@ -14,6 +14,13 @@ struct RawHunk {
     lines: Vec<HunkLine>,
 }
 
+/// State for collecting hunks via git2 foreach callbacks.
+struct CollectState {
+    hunks: HashMap<String, RawHunk>,
+    current_path: String,
+    current_hunk_id: Option<String>,
+}
+
 /// Reconstruct a valid unified diff patch containing only selected lines from a hunk.
 ///
 /// Rules:
@@ -57,18 +64,22 @@ fn reconstruct_patch(hunk: &RawHunk, selected_indices: &HashSet<usize>) -> Strin
         }
     }
 
-    // Build the full patch string
-    let header = format!("@@ -{},{} +{},{} @@", hunk.old_start, old_count, hunk.old_start, new_count);
+    let header = format!(
+        "@@ -{},{} +{},{} @@",
+        hunk.old_start, old_count, hunk.old_start, new_count
+    );
 
     let mut patch = String::new();
-    patch.push_str(&format!("diff --git a/{} b/{}\n", hunk.file_path, hunk.file_path));
+    patch.push_str(&format!(
+        "diff --git a/{} b/{}\n",
+        hunk.file_path, hunk.file_path
+    ));
     patch.push_str(&format!("--- a/{}\n", hunk.file_path));
     patch.push_str(&format!("+++ b/{}\n", hunk.file_path));
     patch.push_str(&header);
     patch.push('\n');
     for line in &patch_lines {
         patch.push_str(line);
-        // Ensure each line ends with newline
         if !line.ends_with('\n') {
             patch.push('\n');
         }
@@ -88,36 +99,36 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
         .diff_index_to_workdir(None, Some(&mut opts))
         .context("failed to generate diff")?;
 
-    let state = RefCell::new((
-        HashMap::<String, RawHunk>::new(),
-        String::new(),           // current file path
-        Option::<String>::None,  // current hunk ID
-    ));
+    let state = RefCell::new(CollectState {
+        hunks: HashMap::new(),
+        current_path: String::new(),
+        current_hunk_id: None,
+    });
 
     diff.foreach(
         &mut |delta, _| {
             let mut s = state.borrow_mut();
-            s.1 = delta
+            s.current_path = delta
                 .new_file()
                 .path()
                 .or_else(|| delta.old_file().path())
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            s.2 = None;
+            s.current_hunk_id = None;
             true
         },
         None,
         Some(&mut |_delta, hunk| {
             let mut s = state.borrow_mut();
             let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
-            let id = hunk_id(&s.1, hunk.old_start(), &header);
+            let id = hunk_id(&s.current_path, hunk.old_start(), &header);
             let raw = RawHunk {
-                file_path: s.1.clone(),
+                file_path: s.current_path.clone(),
                 old_start: hunk.old_start(),
                 lines: Vec::new(),
             };
-            s.0.insert(id.clone(), raw);
-            s.2 = Some(id);
+            s.hunks.insert(id.clone(), raw);
+            s.current_hunk_id = Some(id);
             true
         }),
         Some(&mut |_delta, _hunk, line| {
@@ -134,8 +145,8 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
                 old_lineno: line.old_lineno(),
                 new_lineno: line.new_lineno(),
             };
-            if let Some(id) = s.2.clone() {
-                if let Some(raw) = s.0.get_mut(&id) {
+            if let Some(id) = s.current_hunk_id.clone() {
+                if let Some(raw) = s.hunks.get_mut(&id) {
                     raw.lines.push(hunk_line);
                 }
             }
@@ -144,16 +155,31 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
     )
     .context("failed to iterate diff")?;
 
-    Ok(state.into_inner().0)
+    Ok(state.into_inner().hunks)
 }
 
 /// Stage selected hunks and/or lines to the git index.
+///
+/// Hunk-level and line-level selections must not be mixed in a single request,
+/// because hunk staging modifies the index and invalidates line-level hunk IDs.
 pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<StageResult> {
     if request.hunk_ids.is_empty() && request.line_selections.is_empty() {
         return Ok(StageResult {
             staged: 0,
             failed: 0,
             errors: vec!["no hunk IDs or line selections provided".into()],
+        });
+    }
+
+    // Reject mixed requests — hunk staging changes the index, invalidating line-level IDs.
+    if !request.hunk_ids.is_empty() && !request.line_selections.is_empty() {
+        return Ok(StageResult {
+            staged: 0,
+            failed: 0,
+            errors: vec![
+                "cannot mix hunk_ids and line_selections in a single request; use separate calls"
+                    .into(),
+            ],
         });
     }
 
@@ -202,7 +228,8 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         .context("failed to scan diff for hunk IDs")?;
 
         let available_ids = available_ids.into_inner();
-        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
+        let unique_requested: HashSet<&str> =
+            request.hunk_ids.iter().map(|s| s.as_str()).collect();
 
         let mut valid_ids: HashSet<String> = HashSet::new();
         for req_id in &unique_requested {
@@ -245,10 +272,13 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
     }
 
     // --- Line-level staging ---
+    // Each line selection is applied individually. We re-collect hunks before each
+    // apply because prior applies modify the index, shifting line positions.
     if !request.line_selections.is_empty() {
-        let hunks = collect_hunks(&repo)?;
-
         for sel in &request.line_selections {
+            // Re-collect hunks from the current (potentially modified) index state
+            let hunks = collect_hunks(&repo)?;
+
             match hunks.get(&sel.hunk_id) {
                 None => {
                     errors.push(format!("hunk ID not found: {}", sel.hunk_id));
@@ -278,7 +308,10 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                         Ok(patch_diff) => {
                             repo.apply(&patch_diff, ApplyLocation::Index, None)
                                 .with_context(|| {
-                                    format!("failed to apply line selection for hunk {}", sel.hunk_id)
+                                    format!(
+                                        "failed to apply line selection for hunk {}",
+                                        sel.hunk_id
+                                    )
                                 })?;
                             staged += 1;
                         }
@@ -398,7 +431,7 @@ mod tests {
         String::from_utf8(blob.content().to_vec()).unwrap()
     }
 
-    // ===== Hunk-level tests (preserved from GTST-4) =====
+    // ===== Hunk-level tests =====
 
     #[test]
     fn stage_single_hunk() {
@@ -520,7 +553,27 @@ mod tests {
         assert!(!remaining_ids.contains(&first_id.as_str()));
     }
 
-    // ===== Line-level tests (GTST-5) =====
+    // ===== Mixed request rejection =====
+
+    #[test]
+    fn stage_mixed_hunk_and_line_rejected() {
+        let (dir, _repo) = setup_line_level_repo();
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let hunk = &output.files[0].hunks[0];
+
+        let request = StageRequest {
+            hunk_ids: vec![hunk.id.clone()],
+            line_selections: vec![LineSelection {
+                hunk_id: hunk.id.clone(),
+                line_indices: vec![0],
+            }],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 0);
+        assert!(result.errors[0].contains("cannot mix"));
+    }
+
+    // ===== Line-level tests =====
 
     #[test]
     fn line_stage_select_one_change() {
@@ -529,7 +582,6 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        // Find the first insert line index
         let insert_idx = hunk
             .lines
             .iter()
@@ -547,10 +599,8 @@ mod tests {
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
 
-        // Should have staged something
         assert!(count_staged_hunks(&repo) > 0);
 
-        // Remaining unstaged diff should still have changes
         let remaining = diff_unstaged(dir.path(), None).unwrap();
         assert!(remaining.total_hunks > 0);
     }
@@ -562,7 +612,6 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        // Select one delete and one insert
         let delete_idx = hunk
             .lines
             .iter()
@@ -585,7 +634,6 @@ mod tests {
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
 
-        // Index should have changes
         assert!(count_staged_hunks(&repo) > 0);
     }
 
@@ -596,7 +644,6 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        // Select ALL change lines (delete + insert)
         let change_indices: Vec<usize> = hunk
             .lines
             .iter()
@@ -615,7 +662,6 @@ mod tests {
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
 
-        // Index content should match working tree content
         let index_content = read_index_content(dir.path(), "code.txt");
         let working_content = fs::read_to_string(dir.path().join("code.txt")).unwrap();
         assert_eq!(index_content, working_content);
@@ -645,7 +691,6 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        // Select only context lines
         let context_indices: Vec<usize> = hunk
             .lines
             .iter()
@@ -681,7 +726,6 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
 
-        // Stage only the first change line
         let request = StageRequest {
             hunk_ids: vec![],
             line_selections: vec![LineSelection {
@@ -691,8 +735,68 @@ mod tests {
         };
         stage_selection(dir.path(), &request).unwrap();
 
-        // Remaining diff should still show unstaged changes
         let remaining = diff_unstaged(dir.path(), None).unwrap();
-        assert!(remaining.total_hunks > 0, "should still have unstaged changes");
+        assert!(
+            remaining.total_hunks > 0,
+            "should still have unstaged changes"
+        );
+    }
+
+    #[test]
+    fn line_stage_multiple_selections_sequentially() {
+        let (dir, _repo) = setup_line_level_repo();
+
+        let output = diff_unstaged(dir.path(), None).unwrap();
+        let hunk = &output.files[0].hunks[0];
+
+        // Get all change line indices
+        let change_indices: Vec<usize> = hunk
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.tag != LineTag::Equal)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(change_indices.len() >= 2, "need at least 2 changes");
+
+        // Stage first change only
+        let request = StageRequest {
+            hunk_ids: vec![],
+            line_selections: vec![LineSelection {
+                hunk_id: hunk.id.clone(),
+                line_indices: vec![change_indices[0]],
+            }],
+        };
+        let result = stage_selection(dir.path(), &request).unwrap();
+        assert_eq!(result.staged, 1);
+
+        // Now stage remaining changes in a second request.
+        // The hunk ID may have changed due to the first staging, so re-diff.
+        let output2 = diff_unstaged(dir.path(), None).unwrap();
+        assert!(output2.total_hunks > 0, "should still have changes");
+
+        let hunk2 = &output2.files[0].hunks[0];
+        let remaining_changes: Vec<usize> = hunk2
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.tag != LineTag::Equal)
+            .map(|(i, _)| i)
+            .collect();
+
+        let request2 = StageRequest {
+            hunk_ids: vec![],
+            line_selections: vec![LineSelection {
+                hunk_id: hunk2.id.clone(),
+                line_indices: remaining_changes,
+            }],
+        };
+        let result2 = stage_selection(dir.path(), &request2).unwrap();
+        assert_eq!(result2.staged, 1);
+
+        // All changes should now be staged — index matches working tree
+        let index_content = read_index_content(dir.path(), "code.txt");
+        let working_content = fs::read_to_string(dir.path().join("code.txt")).unwrap();
+        assert_eq!(index_content, working_content);
     }
 }
