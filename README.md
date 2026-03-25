@@ -15,7 +15,8 @@ Git hunk sifter for code agents. A selective staging tool (`git add -p` replacem
 ### macOS (Homebrew)
 
 ```bash
-brew install MonteYin/tap/gitsift
+brew tap MonteYin/tap
+brew install gitsift
 ```
 
 ### From source
