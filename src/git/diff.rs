@@ -12,7 +12,7 @@ use crate::models::{DiffOutput, FileChange, FileStatus, Hunk, HunkLine, LineTag}
 /// Note: Uses `DefaultHasher` which is not guaranteed stable across Rust versions.
 /// IDs are ephemeral — valid only within a single diff→stage cycle using the same binary.
 /// Do not persist or compare across different gitsift versions.
-fn hunk_id(file_path: &str, old_start: u32, header: &str) -> String {
+pub fn hunk_id(file_path: &str, old_start: u32, header: &str) -> String {
     let mut hasher = DefaultHasher::new();
     file_path.hash(&mut hasher);
     old_start.hash(&mut hasher);
