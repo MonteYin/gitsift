@@ -3,6 +3,7 @@ mod git;
 mod models;
 mod output;
 mod protocol;
+mod toon;
 
 use anyhow::Result;
 use clap::Parser;
