@@ -60,6 +60,17 @@ pub enum FileStatus {
     Renamed,
 }
 
+impl std::fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Modified => write!(f, "modified"),
+            Self::Added => write!(f, "added"),
+            Self::Deleted => write!(f, "deleted"),
+            Self::Renamed => write!(f, "renamed"),
+        }
+    }
+}
+
 /// Output of `gitsift diff`.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiffOutput {

@@ -25,7 +25,7 @@ pub fn format_diff(output: &DiffOutput) -> String {
     writeln!(buf, "files[{}]:", output.files.len()).unwrap();
     for file in &output.files {
         writeln!(buf, "  - path: {}", file.path).unwrap();
-        writeln!(buf, "    status: {:?}", file.status).unwrap();
+        writeln!(buf, "    status: {}", file.status).unwrap();
 
         if file.hunks.is_empty() {
             writeln!(buf, "    hunks[0]:").unwrap();
