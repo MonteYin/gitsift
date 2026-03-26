@@ -5,8 +5,8 @@ use std::path::PathBuf;
 #[command(name = "gitsift", version, about = "Git hunk sifter for code agents")]
 #[command(propagate_version = true)]
 pub struct Cli {
-    /// Output format (auto-detects terminal vs pipe)
-    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Auto)]
+    /// Output format (toon = compact token-efficient, json = full structured)
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Toon)]
     pub format: OutputFormat,
 
     /// Path to git repository
@@ -41,9 +41,8 @@ pub enum Commands {
     Protocol,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, ValueEnum)]
 pub enum OutputFormat {
-    Auto,
+    Toon,
     Json,
-    Human,
 }

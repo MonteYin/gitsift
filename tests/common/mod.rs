@@ -35,3 +35,8 @@ pub fn gitsift() -> Command {
 pub fn parse_json(stdout: &[u8]) -> serde_json::Value {
     serde_json::from_slice(stdout).unwrap()
 }
+
+/// Convert stdout bytes to a string for compact format assertions.
+pub fn stdout_str(stdout: &[u8]) -> String {
+    String::from_utf8(stdout.to_vec()).unwrap()
+}

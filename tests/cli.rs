@@ -1,6 +1,6 @@
 mod common;
 
-use common::{gitsift, parse_json, setup_repo};
+use common::{gitsift, parse_json, setup_repo, stdout_str};
 use std::fs;
 
 // ===== diff subcommand =====
@@ -32,21 +32,6 @@ fn diff_json_no_changes() {
     assert!(output.status.success());
     let val = parse_json(&output.stdout);
     assert_eq!(val["data"]["total_hunks"], 0);
-}
-
-#[test]
-fn diff_human_output_contains_hunk_ids() {
-    let dir = setup_repo();
-    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
-
-    let output =
-        gitsift().args(["diff", "--format", "human", "--repo"]).arg(dir.path()).output().unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    // Human output shows hunk IDs in brackets and @@ headers
-    assert!(stdout.contains("@@"));
-    assert!(stdout.contains('['));
 }
 
 #[test]
@@ -148,20 +133,6 @@ fn status_json_output() {
     assert_eq!(val["data"]["staged_files"], 0);
 }
 
-#[test]
-fn status_human_output() {
-    let dir = setup_repo();
-    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
-
-    let output =
-        gitsift().args(["status", "--format", "human", "--repo"]).arg(dir.path()).output().unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Staged:"));
-    assert!(stdout.contains("Unstaged:"));
-}
-
 // ===== help =====
 
 #[test]
@@ -215,4 +186,103 @@ fn full_workflow_diff_stage_status() {
         .unwrap();
     let diff2_val = parse_json(&diff2_out.stdout);
     assert_eq!(diff2_val["data"]["total_hunks"], 0);
+}
+
+// ===== Compact (TOON-like) format =====
+
+#[test]
+fn diff_toon_has_expected_structure() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\n").unwrap();
+
+    let output = gitsift().args(["diff", "--repo"]).arg(dir.path()).output().unwrap();
+
+    assert!(output.status.success());
+    let out = stdout_str(&output.stdout);
+    assert!(out.contains("version: 1"));
+    assert!(out.contains("ok: true"));
+    assert!(out.contains("total_hunks:"));
+    assert!(out.contains("files["));
+    assert!(out.contains("path: hello.txt"));
+}
+
+#[test]
+fn diff_toon_no_context_lines() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\n").unwrap();
+
+    let output = gitsift().args(["diff", "--repo"]).arg(dir.path()).output().unwrap();
+
+    let out = stdout_str(&output.stdout);
+    assert!(!out.contains("line 1\\n"), "context line 'line 1' should be stripped");
+    assert!(!out.contains("line 3\\n"), "context line 'line 3' should be stripped");
+}
+
+#[test]
+fn diff_toon_tabular_header() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\n").unwrap();
+
+    let output = gitsift().args(["diff", "--repo"]).arg(dir.path()).output().unwrap();
+
+    let out = stdout_str(&output.stdout);
+    assert!(out.contains("{tag,content,old,new}:"), "should have tabular header for lines");
+}
+
+#[test]
+fn diff_toon_hunk_ids_match_json() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let json_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let toon_out = gitsift().args(["diff", "--repo"]).arg(dir.path()).output().unwrap();
+
+    let json_val = parse_json(&json_out.stdout);
+    let json_id = json_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    let toon_str = stdout_str(&toon_out.stdout);
+    assert!(toon_str.contains(&format!("id: {json_id}")));
+}
+
+#[test]
+fn status_toon_output() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let output = gitsift().args(["status", "--repo"]).arg(dir.path()).output().unwrap();
+
+    assert!(output.status.success());
+    let out = stdout_str(&output.stdout);
+    assert!(out.contains("ok: true"));
+    assert!(out.contains("unstaged_files: 1"));
+    assert!(out.contains("staged_files: 0"));
+}
+
+#[test]
+fn default_format_is_toon() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let output = gitsift().args(["diff", "--repo"]).arg(dir.path()).output().unwrap();
+
+    assert!(output.status.success());
+    let out = stdout_str(&output.stdout);
+    assert!(!out.starts_with('{'), "default should be toon, not JSON");
+    assert!(out.contains("version: 1"));
+}
+
+#[test]
+fn json_format_preserves_context_lines() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\n").unwrap();
+
+    let output =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+
+    assert!(output.status.success());
+    let val = parse_json(&output.stdout);
+    let lines = val["data"]["files"][0]["hunks"][0]["lines"].as_array().unwrap();
+    let has_equal = lines.iter().any(|l| l["tag"] == "equal");
+    assert!(has_equal, "JSON format should preserve context lines");
 }
