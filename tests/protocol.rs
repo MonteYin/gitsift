@@ -1,32 +1,7 @@
-use assert_cmd::Command;
-use git2::{Repository, Signature};
+mod common;
+
+use common::{gitsift, setup_repo};
 use std::fs;
-use std::path::Path;
-use tempfile::TempDir;
-
-fn setup_repo() -> TempDir {
-    let dir = TempDir::new().unwrap();
-    let repo = Repository::init(dir.path()).unwrap();
-    let sig = Signature::now("test", "test@test.com").unwrap();
-
-    fs::write(dir.path().join("hello.txt"), "line 1\nline 2\nline 3\n").unwrap();
-
-    {
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("hello.txt")).unwrap();
-        index.write().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-            .unwrap();
-    }
-
-    dir
-}
-
-fn gitsift() -> Command {
-    Command::cargo_bin("gitsift").unwrap()
-}
 
 /// Parse each line of stdout as a JSON value.
 fn parse_response_lines(stdout: &str) -> Vec<serde_json::Value> {
@@ -112,12 +87,7 @@ fn protocol_invalid_json() {
     let responses = parse_response_lines(&String::from_utf8(output.stdout).unwrap());
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["ok"], false);
-    assert!(
-        responses[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("invalid request")
-    );
+    assert!(responses[0]["error"].as_str().unwrap().contains("invalid request"));
 }
 
 #[test]
@@ -168,12 +138,8 @@ fn protocol_multiple_requests() {
     .join("\n")
         + "\n";
 
-    let output = gitsift()
-        .args(["protocol", "--repo"])
-        .arg(dir.path())
-        .write_stdin(stdin)
-        .output()
-        .unwrap();
+    let output =
+        gitsift().args(["protocol", "--repo"]).arg(dir.path()).write_stdin(stdin).output().unwrap();
 
     assert!(output.status.success());
     let responses = parse_response_lines(&String::from_utf8(output.stdout).unwrap());
@@ -197,9 +163,7 @@ fn protocol_full_workflow_diff_stage_status() {
         .output()
         .unwrap();
     let diff_resp = parse_response_lines(&String::from_utf8(diff_output.stdout).unwrap());
-    let hunk_id = diff_resp[0]["data"]["files"][0]["hunks"][0]["id"]
-        .as_str()
-        .unwrap();
+    let hunk_id = diff_resp[0]["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
 
     // Step 2: stage that hunk
     let stage_stdin =
@@ -233,12 +197,8 @@ fn protocol_each_response_is_one_line() {
 
     let stdin = "{\"method\": \"diff\"}\n{\"method\": \"status\"}\n";
 
-    let output = gitsift()
-        .args(["protocol", "--repo"])
-        .arg(dir.path())
-        .write_stdin(stdin)
-        .output()
-        .unwrap();
+    let output =
+        gitsift().args(["protocol", "--repo"]).arg(dir.path()).write_stdin(stdin).output().unwrap();
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let non_empty_lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{DiffOptions, Repository};
+use git2::Repository;
 use std::path::Path;
 
 use crate::models::StatusSummary;
@@ -30,23 +30,17 @@ pub fn get_status(repo_path: &Path) -> Result<StatusSummary> {
     };
 
     // Unstaged: diff between index and working directory
-    let mut opts = DiffOptions::new();
-    opts.include_untracked(true);
-    opts.show_untracked_content(true);
+    let mut opts = super::diff_opts_with_untracked();
 
     let unstaged_diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .context("failed to diff index to workdir")?;
     let (unstaged_files, unstaged_hunks) = count_files_and_hunks(&unstaged_diff)?;
 
-    Ok(StatusSummary {
-        staged_files,
-        unstaged_files,
-        staged_hunks,
-        unstaged_hunks,
-    })
+    Ok(StatusSummary { staged_files, unstaged_files, staged_hunks, unstaged_hunks })
 }
 
+/// Count distinct files and hunks in a git2 `Diff`.
 fn count_files_and_hunks(diff: &git2::Diff) -> Result<(usize, usize)> {
     let mut files = 0usize;
     let mut hunks = 0usize;
@@ -91,8 +85,7 @@ mod tests {
             index.write().unwrap();
             let tree_oid = index.write_tree().unwrap();
             let tree = repo.find_tree(tree_oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
 
         (dir, repo)
@@ -131,10 +124,7 @@ mod tests {
         let hunk_id = output.files[0].hunks[0].id.clone();
         stage_selection(
             dir.path(),
-            &StageRequest {
-                hunk_ids: vec![hunk_id],
-                line_selections: vec![],
-            },
+            &StageRequest { hunk_ids: vec![hunk_id], line_selections: vec![] },
         )
         .unwrap();
 

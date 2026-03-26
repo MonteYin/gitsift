@@ -1,29 +1,21 @@
 use anyhow::{Context, Result};
-use git2::{ApplyLocation, ApplyOptions, Delta, Diff, DiffOptions, Repository};
+use git2::{ApplyLocation, ApplyOptions, Delta, Diff, Repository};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::diff::hunk_id;
+use super::{delta_path, hunk_header, is_binary_delta};
 #[cfg(test)]
 use crate::models::LineSelection;
 use crate::models::{HunkLine, LineTag, StageRequest, StageResult};
 
-/// Check if a git2 DiffDelta represents a binary file.
-fn is_binary_delta(delta: &git2::DiffDelta) -> bool {
-    delta.new_file().is_binary() || delta.old_file().is_binary()
-}
-
-/// Scan the diff and return a map of hunk_id → (file_path, is_untracked).
+/// Scan the diff and return a map of `hunk_id` → (`file_path`, `is_untracked`).
 fn scan_hunk_metadata(repo: &Repository) -> Result<HashMap<String, (String, bool)>> {
-    let mut opts = DiffOptions::new();
-    opts.context_lines(3);
-    opts.include_untracked(true);
-    opts.show_untracked_content(true);
+    let mut opts = super::diff_opts_with_untracked();
 
-    let diff = repo
-        .diff_index_to_workdir(None, Some(&mut opts))
-        .context("failed to generate diff")?;
+    let diff =
+        repo.diff_index_to_workdir(None, Some(&mut opts)).context("failed to generate diff")?;
 
     let metadata: RefCell<HashMap<String, (String, bool)>> = RefCell::new(HashMap::new());
     let current: RefCell<(String, bool)> = RefCell::new((String::new(), false));
@@ -34,12 +26,7 @@ fn scan_hunk_metadata(repo: &Repository) -> Result<HashMap<String, (String, bool
                 *current.borrow_mut() = (String::new(), false);
                 return true;
             }
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let path = delta_path(&delta);
             let untracked = delta.status() == Delta::Untracked;
             *current.borrow_mut() = (path, untracked);
             true
@@ -47,7 +34,7 @@ fn scan_hunk_metadata(repo: &Repository) -> Result<HashMap<String, (String, bool
         None,
         Some(&mut |_delta, hunk| {
             let cur = current.borrow();
-            let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+            let header = hunk_header(&hunk);
             let id = hunk_id(&cur.0, hunk.old_start(), &header);
             metadata.borrow_mut().insert(id, (cur.0.clone(), cur.1));
             true
@@ -99,6 +86,8 @@ struct CollectState {
 /// - Unselected `+` lines: drop entirely
 /// - Recalculate @@ header counts
 fn reconstruct_patch(hunk: &RawHunk, selected_indices: &HashSet<usize>) -> String {
+    use std::fmt::Write;
+
     let mut patch_lines: Vec<String> = Vec::new();
     let mut old_count: u32 = 0;
     let mut new_count: u32 = 0;
@@ -132,18 +121,13 @@ fn reconstruct_patch(hunk: &RawHunk, selected_indices: &HashSet<usize>) -> Strin
         }
     }
 
-    let header = format!(
-        "@@ -{},{} +{},{} @@",
-        hunk.old_start, old_count, hunk.old_start, new_count
-    );
+    let header =
+        format!("@@ -{},{} +{},{} @@", hunk.old_start, old_count, hunk.old_start, new_count);
 
     let mut patch = String::new();
-    patch.push_str(&format!(
-        "diff --git a/{} b/{}\n",
-        hunk.file_path, hunk.file_path
-    ));
-    patch.push_str(&format!("--- a/{}\n", hunk.file_path));
-    patch.push_str(&format!("+++ b/{}\n", hunk.file_path));
+    let _ = writeln!(patch, "diff --git a/{0} b/{0}", hunk.file_path);
+    let _ = writeln!(patch, "--- a/{}", hunk.file_path);
+    let _ = writeln!(patch, "+++ b/{}", hunk.file_path);
     patch.push_str(&header);
     patch.push('\n');
     for line in &patch_lines {
@@ -158,14 +142,10 @@ fn reconstruct_patch(hunk: &RawHunk, selected_indices: &HashSet<usize>) -> Strin
 
 /// Collect all hunk data from the unstaged diff, keyed by hunk ID.
 fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
-    let mut opts = DiffOptions::new();
-    opts.context_lines(3);
-    opts.include_untracked(true);
-    opts.show_untracked_content(true);
+    let mut opts = super::diff_opts_with_untracked();
 
-    let diff = repo
-        .diff_index_to_workdir(None, Some(&mut opts))
-        .context("failed to generate diff")?;
+    let diff =
+        repo.diff_index_to_workdir(None, Some(&mut opts)).context("failed to generate diff")?;
 
     let state = RefCell::new(CollectState {
         hunks: HashMap::new(),
@@ -180,12 +160,7 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
                 s.current_path.clear();
                 s.current_hunk_id = None;
             } else {
-                s.current_path = delta
-                    .new_file()
-                    .path()
-                    .or_else(|| delta.old_file().path())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                s.current_path = delta_path(&delta);
                 s.current_hunk_id = None;
             }
             true
@@ -193,7 +168,7 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
         None,
         Some(&mut |_delta, hunk| {
             let mut s = state.borrow_mut();
-            let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+            let header = hunk_header(&hunk);
             let id = hunk_id(&s.current_path, hunk.old_start(), &header);
             let raw = RawHunk {
                 file_path: s.current_path.clone(),
@@ -206,11 +181,7 @@ fn collect_hunks(repo: &Repository) -> Result<HashMap<String, RawHunk>> {
         }),
         Some(&mut |_delta, _hunk, line| {
             let mut s = state.borrow_mut();
-            let tag = match line.origin() {
-                '+' | '>' => LineTag::Insert,
-                '-' | '<' => LineTag::Delete,
-                _ => LineTag::Equal,
-            };
+            let tag = LineTag::from_origin(line.origin());
             let content = String::from_utf8_lossy(line.content()).into_owned();
             let hunk_line = HunkLine {
                 tag,
@@ -267,7 +238,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
     // --- Hunk-level staging ---
     if !request.hunk_ids.is_empty() {
-        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(|s| s.as_str()).collect();
+        let unique_requested: HashSet<&str> = request.hunk_ids.iter().map(String::as_str).collect();
 
         // Separate untracked file hunks from tracked file hunks.
         let mut untracked_paths: Vec<String> = Vec::new();
@@ -300,8 +271,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         // For tracked hunks, generate a diff WITHOUT untracked files and apply.
         if !tracked_ids.is_empty() {
             // Diff excludes untracked files — apply() only sees tracked changes
-            let mut opts = DiffOptions::new();
-            opts.context_lines(3);
+            let mut opts = super::diff_opts_tracked_only();
 
             let diff = repo
                 .diff_index_to_workdir(None, Some(&mut opts))
@@ -316,20 +286,14 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                     if is_binary_delta(&delta) {
                         *scan_path.borrow_mut() = String::new();
                     } else {
-                        let path = delta
-                            .new_file()
-                            .path()
-                            .or_else(|| delta.old_file().path())
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        *scan_path.borrow_mut() = path;
+                        *scan_path.borrow_mut() = delta_path(&delta);
                     }
                     true
                 },
                 None,
                 Some(&mut |_delta, hunk| {
                     let path = scan_path.borrow();
-                    let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+                    let header = hunk_header(&hunk);
                     let id = hunk_id(&path, hunk.old_start(), &header);
                     available_ids.borrow_mut().insert(id);
                     true
@@ -351,29 +315,21 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
 
                 let mut apply_opts = ApplyOptions::new();
                 apply_opts.delta_callback(|delta| {
-                    let d = match delta {
-                        Some(d) => d,
-                        None => return false,
+                    let Some(d) = delta else {
+                        return false;
                     };
                     if is_binary_delta(&d) {
                         return false;
                     }
-                    let path = d
-                        .new_file()
-                        .path()
-                        .or_else(|| d.old_file().path())
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    *current_path.borrow_mut() = path;
+                    *current_path.borrow_mut() = delta_path(&d);
                     true
                 });
                 apply_opts.hunk_callback(|hunk| {
-                    let hunk = match hunk {
-                        Some(h) => h,
-                        None => return false,
+                    let Some(hunk) = hunk else {
+                        return false;
                     };
                     let path = current_path.borrow();
-                    let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+                    let header = hunk_header(&hunk);
                     let id = hunk_id(&path, hunk.old_start(), &header);
                     valid_ids.contains(&id)
                 });
@@ -413,12 +369,9 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                     let selected: HashSet<usize> = sel.line_indices.iter().copied().collect();
 
                     // Validate: at least one selected index is a change line (not context)
-                    let has_change = selected.iter().any(|&i| {
-                        raw.lines
-                            .get(i)
-                            .map(|l| l.tag != LineTag::Equal)
-                            .unwrap_or(false)
-                    });
+                    let has_change = selected
+                        .iter()
+                        .any(|&i| raw.lines.get(i).is_some_and(|l| l.tag != LineTag::Equal));
                     if !has_change {
                         errors.push(format!("no change lines selected for hunk {}", sel.hunk_id));
                         failed += 1;
@@ -428,13 +381,14 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
                     let patch_str = reconstruct_patch(raw, &selected);
                     match Diff::from_buffer(patch_str.as_bytes()) {
                         Ok(patch_diff) => {
-                            repo.apply(&patch_diff, ApplyLocation::Index, None)
-                                .with_context(|| {
+                            repo.apply(&patch_diff, ApplyLocation::Index, None).with_context(
+                                || {
                                     format!(
                                         "failed to apply line selection for hunk {}",
                                         sel.hunk_id
                                     )
-                                })?;
+                                },
+                            )?;
                             staged += 1;
                         }
                         Err(e) => {
@@ -450,11 +404,7 @@ pub fn stage_selection(repo_path: &Path, request: &StageRequest) -> Result<Stage
         }
     }
 
-    Ok(StageResult {
-        staged,
-        failed,
-        errors,
-    })
+    Ok(StageResult { staged, failed, errors })
 }
 
 #[cfg(test)]
@@ -480,8 +430,7 @@ mod tests {
             index.write().unwrap();
             let tree_oid = index.write_tree().unwrap();
             let tree = repo.find_tree(tree_oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
 
         let mut modified = lines;
@@ -498,11 +447,7 @@ mod tests {
         let repo = Repository::init(dir.path()).unwrap();
         let sig = Signature::now("test", "test@test.com").unwrap();
 
-        fs::write(
-            dir.path().join("code.txt"),
-            "alpha\nbeta\ngamma\ndelta\nepsilon\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("code.txt"), "alpha\nbeta\ngamma\ndelta\nepsilon\n").unwrap();
 
         {
             let mut index = repo.index().unwrap();
@@ -510,16 +455,11 @@ mod tests {
             index.write().unwrap();
             let tree_oid = index.write_tree().unwrap();
             let tree = repo.find_tree(tree_oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
 
         // Replace beta→BETA, add NEW after gamma, delete delta
-        fs::write(
-            dir.path().join("code.txt"),
-            "alpha\nBETA\ngamma\nNEW\nepsilon\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("code.txt"), "alpha\nBETA\ngamma\nNEW\nepsilon\n").unwrap();
 
         (dir, repo)
     }
@@ -560,10 +500,7 @@ mod tests {
         assert!(output.total_hunks >= 2);
 
         let first_id = output.files[0].hunks[0].id.clone();
-        let request = StageRequest {
-            hunk_ids: vec![first_id],
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: vec![first_id], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
@@ -579,10 +516,7 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let all_ids: Vec<String> = output.files[0].hunks.iter().map(|h| h.id.clone()).collect();
 
-        let request = StageRequest {
-            hunk_ids: all_ids.clone(),
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: all_ids.clone(), line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, all_ids.len());
         assert_eq!(count_staged_hunks(&repo), all_ids.len());
@@ -594,10 +528,8 @@ mod tests {
     #[test]
     fn stage_invalid_hunk_id() {
         let (dir, repo) = setup_two_hunk_repo();
-        let request = StageRequest {
-            hunk_ids: vec!["nonexistent_id".into()],
-            line_selections: vec![],
-        };
+        let request =
+            StageRequest { hunk_ids: vec!["nonexistent_id".into()], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 0);
         assert_eq!(result.failed, 1);
@@ -611,10 +543,8 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let valid_id = output.files[0].hunks[0].id.clone();
 
-        let request = StageRequest {
-            hunk_ids: vec![valid_id, "bad_id".into()],
-            line_selections: vec![],
-        };
+        let request =
+            StageRequest { hunk_ids: vec![valid_id, "bad_id".into()], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 1);
@@ -627,10 +557,8 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let first_id = output.files[0].hunks[0].id.clone();
 
-        let request = StageRequest {
-            hunk_ids: vec![first_id.clone(), first_id],
-            line_selections: vec![],
-        };
+        let request =
+            StageRequest { hunk_ids: vec![first_id.clone(), first_id], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
@@ -640,10 +568,7 @@ mod tests {
     #[test]
     fn stage_empty_request() {
         let (dir, _repo) = setup_two_hunk_repo();
-        let request = StageRequest {
-            hunk_ids: vec![],
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: vec![], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 0);
         assert!(result.errors[0].contains("no hunk IDs"));
@@ -656,20 +581,14 @@ mod tests {
         let first_id = output.files[0].hunks[0].id.clone();
         let original_count = output.total_hunks;
 
-        let request = StageRequest {
-            hunk_ids: vec![first_id.clone()],
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: vec![first_id.clone()], line_selections: vec![] };
         stage_selection(dir.path(), &request).unwrap();
 
         let after = diff_unstaged(dir.path(), None).unwrap();
         assert_eq!(after.total_hunks, original_count - 1);
 
-        let remaining_ids: Vec<&str> = after
-            .files
-            .iter()
-            .flat_map(|f| f.hunks.iter().map(|h| h.id.as_str()))
-            .collect();
+        let remaining_ids: Vec<&str> =
+            after.files.iter().flat_map(|f| f.hunks.iter().map(|h| h.id.as_str())).collect();
         assert!(!remaining_ids.contains(&first_id.as_str()));
     }
 
@@ -702,11 +621,7 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        let insert_idx = hunk
-            .lines
-            .iter()
-            .position(|l| l.tag == LineTag::Insert)
-            .unwrap();
+        let insert_idx = hunk.lines.iter().position(|l| l.tag == LineTag::Insert).unwrap();
 
         let request = StageRequest {
             hunk_ids: vec![],
@@ -732,16 +647,8 @@ mod tests {
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
 
-        let delete_idx = hunk
-            .lines
-            .iter()
-            .position(|l| l.tag == LineTag::Delete)
-            .unwrap();
-        let insert_idx = hunk
-            .lines
-            .iter()
-            .position(|l| l.tag == LineTag::Insert)
-            .unwrap();
+        let delete_idx = hunk.lines.iter().position(|l| l.tag == LineTag::Delete).unwrap();
+        let insert_idx = hunk.lines.iter().position(|l| l.tag == LineTag::Insert).unwrap();
 
         let request = StageRequest {
             hunk_ids: vec![],
@@ -856,10 +763,7 @@ mod tests {
         stage_selection(dir.path(), &request).unwrap();
 
         let remaining = diff_unstaged(dir.path(), None).unwrap();
-        assert!(
-            remaining.total_hunks > 0,
-            "should still have unstaged changes"
-        );
+        assert!(remaining.total_hunks > 0, "should still have unstaged changes");
     }
 
     #[test]
@@ -931,19 +835,10 @@ mod tests {
 
         // Should be able to stage tracked file hunks despite untracked file
         let output = diff_unstaged(dir.path(), None).unwrap();
-        let tracked_hunk = output
-            .files
-            .iter()
-            .find(|f| f.path == "file.txt")
-            .unwrap()
-            .hunks[0]
-            .id
-            .clone();
+        let tracked_hunk =
+            output.files.iter().find(|f| f.path == "file.txt").unwrap().hunks[0].id.clone();
 
-        let request = StageRequest {
-            hunk_ids: vec![tracked_hunk],
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: vec![tracked_hunk], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
@@ -974,10 +869,7 @@ mod tests {
         let new_hunk_id = new_file.unwrap().hunks[0].id.clone();
 
         // Should be able to stage the untracked file's hunk
-        let request = StageRequest {
-            hunk_ids: vec![new_hunk_id],
-            line_selections: vec![],
-        };
+        let request = StageRequest { hunk_ids: vec![new_hunk_id], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 1);
         assert_eq!(result.failed, 0);
@@ -995,28 +887,14 @@ mod tests {
         fs::write(dir.path().join("new.txt"), "new content\n").unwrap();
 
         let output = diff_unstaged(dir.path(), None).unwrap();
-        let tracked_id = output
-            .files
-            .iter()
-            .find(|f| f.path == "file.txt")
-            .unwrap()
-            .hunks[0]
-            .id
-            .clone();
-        let untracked_id = output
-            .files
-            .iter()
-            .find(|f| f.path == "new.txt")
-            .unwrap()
-            .hunks[0]
-            .id
-            .clone();
+        let tracked_id =
+            output.files.iter().find(|f| f.path == "file.txt").unwrap().hunks[0].id.clone();
+        let untracked_id =
+            output.files.iter().find(|f| f.path == "new.txt").unwrap().hunks[0].id.clone();
 
         // Stage both in one request
-        let request = StageRequest {
-            hunk_ids: vec![tracked_id, untracked_id],
-            line_selections: vec![],
-        };
+        let request =
+            StageRequest { hunk_ids: vec![tracked_id, untracked_id], line_selections: vec![] };
         let result = stage_selection(dir.path(), &request).unwrap();
         assert_eq!(result.staged, 2);
         assert_eq!(result.failed, 0);

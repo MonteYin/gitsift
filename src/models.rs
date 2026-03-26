@@ -19,6 +19,17 @@ pub enum LineTag {
     Delete,
 }
 
+impl LineTag {
+    /// Convert a git2 line origin character to a `LineTag`.
+    pub fn from_origin(origin: char) -> Self {
+        match origin {
+            '+' | '>' => Self::Insert,
+            '-' | '<' => Self::Delete,
+            _ => Self::Equal,
+        }
+    }
+}
+
 /// A diff hunk with stable ID for agent reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hunk {
@@ -84,6 +95,9 @@ pub struct StageResult {
     pub errors: Vec<String>,
 }
 
+/// Protocol response version. Increment on breaking schema changes.
+pub const PROTOCOL_VERSION: u8 = 1;
+
 /// Generic JSON response envelope.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Response<T> {
@@ -97,23 +111,13 @@ pub struct Response<T> {
 
 impl<T> Response<T> {
     pub fn success(data: T) -> Self {
-        Self {
-            version: 1,
-            ok: true,
-            data: Some(data),
-            error: None,
-        }
+        Self { version: PROTOCOL_VERSION, ok: true, data: Some(data), error: None }
     }
 }
 
 impl Response<()> {
     pub fn error(msg: impl Into<String>) -> Self {
-        Self {
-            version: 1,
-            ok: false,
-            data: None,
-            error: Some(msg.into()),
-        }
+        Self { version: PROTOCOL_VERSION, ok: false, data: None, error: Some(msg.into()) }
     }
 }
 
@@ -198,36 +202,18 @@ mod tests {
     #[test]
     fn linetag_json_values() {
         assert_eq!(serde_json::to_string(&LineTag::Equal).unwrap(), "\"equal\"");
-        assert_eq!(
-            serde_json::to_string(&LineTag::Insert).unwrap(),
-            "\"insert\""
-        );
-        assert_eq!(
-            serde_json::to_string(&LineTag::Delete).unwrap(),
-            "\"delete\""
-        );
+        assert_eq!(serde_json::to_string(&LineTag::Insert).unwrap(), "\"insert\"");
+        assert_eq!(serde_json::to_string(&LineTag::Delete).unwrap(), "\"delete\"");
     }
 
     // --- FileStatus JSON values ---
 
     #[test]
     fn filestatus_json_values() {
-        assert_eq!(
-            serde_json::to_string(&FileStatus::Modified).unwrap(),
-            "\"modified\""
-        );
-        assert_eq!(
-            serde_json::to_string(&FileStatus::Added).unwrap(),
-            "\"added\""
-        );
-        assert_eq!(
-            serde_json::to_string(&FileStatus::Deleted).unwrap(),
-            "\"deleted\""
-        );
-        assert_eq!(
-            serde_json::to_string(&FileStatus::Renamed).unwrap(),
-            "\"renamed\""
-        );
+        assert_eq!(serde_json::to_string(&FileStatus::Modified).unwrap(), "\"modified\"");
+        assert_eq!(serde_json::to_string(&FileStatus::Added).unwrap(), "\"added\"");
+        assert_eq!(serde_json::to_string(&FileStatus::Deleted).unwrap(), "\"deleted\"");
+        assert_eq!(serde_json::to_string(&FileStatus::Renamed).unwrap(), "\"renamed\"");
     }
 
     // --- Hunk round-trip ---
@@ -287,10 +273,7 @@ mod tests {
 
     #[test]
     fn diff_output_empty() {
-        let output = DiffOutput {
-            files: vec![],
-            total_hunks: 0,
-        };
+        let output = DiffOutput { files: vec![], total_hunks: 0 };
         let json = serde_json::to_string(&output).unwrap();
         assert_eq!(json, r#"{"files":[],"total_hunks":0}"#);
     }
@@ -299,10 +282,8 @@ mod tests {
 
     #[test]
     fn stage_request_hunk_ids_roundtrip() {
-        let req = StageRequest {
-            hunk_ids: vec!["abc".into(), "def".into()],
-            line_selections: vec![],
-        };
+        let req =
+            StageRequest { hunk_ids: vec!["abc".into(), "def".into()], line_selections: vec![] };
         let json = serde_json::to_string(&req).unwrap();
         let back: StageRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
@@ -334,11 +315,7 @@ mod tests {
 
     #[test]
     fn stage_result_success_roundtrip() {
-        let result = StageResult {
-            staged: 3,
-            failed: 0,
-            errors: vec![],
-        };
+        let result = StageResult { staged: 3, failed: 0, errors: vec![] };
         let json = serde_json::to_string(&result).unwrap();
         // errors should be omitted when empty
         assert!(!json.contains("errors"));
@@ -363,10 +340,7 @@ mod tests {
 
     #[test]
     fn response_success_roundtrip() {
-        let resp = Response::success(DiffOutput {
-            files: vec![],
-            total_hunks: 0,
-        });
+        let resp = Response::success(DiffOutput { files: vec![], total_hunks: 0 });
         let json = serde_json::to_string(&resp).unwrap();
         // Should not contain "error" key
         assert!(!json.contains("\"error\""));
@@ -386,11 +360,7 @@ mod tests {
 
     #[test]
     fn response_schema_shape() {
-        let resp = Response::success(StageResult {
-            staged: 1,
-            failed: 0,
-            errors: vec![],
-        });
+        let resp = Response::success(StageResult { staged: 1, failed: 0, errors: vec![] });
         let val: serde_json::Value = serde_json::to_value(&resp).unwrap();
         assert_eq!(val["version"], 1);
         assert_eq!(val["ok"], true);
@@ -453,16 +423,9 @@ mod tests {
     #[test]
     fn protocol_request_roundtrip() {
         let requests = vec![
-            ProtocolRequest::Diff {
-                params: DiffParams {
-                    file: Some("test.rs".into()),
-                },
-            },
+            ProtocolRequest::Diff { params: DiffParams { file: Some("test.rs".into()) } },
             ProtocolRequest::Stage {
-                params: StageRequest {
-                    hunk_ids: vec!["id1".into()],
-                    line_selections: vec![],
-                },
+                params: StageRequest { hunk_ids: vec!["id1".into()], line_selections: vec![] },
             },
             ProtocolRequest::Status,
         ];

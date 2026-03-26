@@ -16,14 +16,11 @@ fn write_response<T: serde::Serialize>(out: &mut impl Write, resp: &Response<T>)
     out.flush()
 }
 
-/// Read a single line from the reader, respecting MAX_LINE_LENGTH.
+/// Read a single line from the reader, respecting `MAX_LINE_LENGTH`.
 /// Returns None on EOF, Some(Err) on read error, Some(Ok(bytes)) on success.
 fn read_line_bytes(reader: &mut impl BufRead) -> Option<io::Result<Vec<u8>>> {
     let mut buf = Vec::new();
-    match reader
-        .take(MAX_LINE_LENGTH as u64)
-        .read_until(b'\n', &mut buf)
-    {
+    match reader.take(MAX_LINE_LENGTH as u64).read_until(b'\n', &mut buf) {
         Ok(0) => None, // EOF
         Ok(_) => {
             // Strip trailing newline
@@ -36,6 +33,17 @@ fn read_line_bytes(reader: &mut impl BufRead) -> Option<io::Result<Vec<u8>>> {
             Some(Ok(buf))
         }
         Err(e) => Some(Err(e)),
+    }
+}
+
+/// Write a success or error response from a `Result`, converting errors to error envelopes.
+fn dispatch<T: serde::Serialize>(
+    out: &mut impl Write,
+    result: anyhow::Result<T>,
+) -> io::Result<()> {
+    match result {
+        Ok(data) => write_response(out, &Response::success(data)),
+        Err(e) => write_response(out, &Response::<()>::error(format!("{e}"))),
     }
 }
 
@@ -66,20 +74,17 @@ pub fn run_protocol(repo_path: &Path) -> Result<()> {
         };
 
         // Skip empty lines
-        if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
         // Parse as UTF-8, return error response for invalid encoding
-        let line = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                let resp = Response::<()>::error("invalid UTF-8 input");
-                if write_response(&mut out, &resp).is_err() {
-                    break;
-                }
-                continue;
+        let Ok(line) = String::from_utf8(bytes) else {
+            let resp = Response::<()>::error("invalid UTF-8 input");
+            if write_response(&mut out, &resp).is_err() {
+                break;
             }
+            continue;
         };
 
         let request = match serde_json::from_str::<ProtocolRequest>(&line) {
@@ -95,21 +100,12 @@ pub fn run_protocol(repo_path: &Path) -> Result<()> {
 
         let write_ok = match request {
             ProtocolRequest::Diff { params } => {
-                match git::diff::diff_unstaged(repo_path, params.file.as_deref()) {
-                    Ok(diff) => write_response(&mut out, &Response::success(diff)),
-                    Err(e) => write_response(&mut out, &Response::<()>::error(format!("{e}"))),
-                }
+                dispatch(&mut out, git::diff::diff_unstaged(repo_path, params.file.as_deref()))
             }
             ProtocolRequest::Stage { params } => {
-                match git::stage::stage_selection(repo_path, &params) {
-                    Ok(result) => write_response(&mut out, &Response::success(result)),
-                    Err(e) => write_response(&mut out, &Response::<()>::error(format!("{e}"))),
-                }
+                dispatch(&mut out, git::stage::stage_selection(repo_path, &params))
             }
-            ProtocolRequest::Status => match git::status::get_status(repo_path) {
-                Ok(status) => write_response(&mut out, &Response::success(status)),
-                Err(e) => write_response(&mut out, &Response::<()>::error(format!("{e}"))),
-            },
+            ProtocolRequest::Status => dispatch(&mut out, git::status::get_status(repo_path)),
         };
 
         if write_ok.is_err() {
