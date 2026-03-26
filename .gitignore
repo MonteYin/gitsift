@@ -21,6 +21,9 @@ CLAUDE.md
 # Test
 test-folder/
 
+# Local docs
+gotchas.md
+
 # Local config
 .env
 *.local

@@ -16,10 +16,7 @@ fn main() -> Result<()> {
             let diff = git::diff::diff_unstaged(&cli.repo, file.as_ref().and_then(|f| f.to_str()))?;
             output::print_diff(&diff, &cli.format);
         }
-        Commands::Stage {
-            hunk_ids,
-            from_stdin,
-        } => {
+        Commands::Stage { hunk_ids, from_stdin } => {
             let request = if *from_stdin {
                 serde_json::from_reader(std::io::stdin())?
             } else {

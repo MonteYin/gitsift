@@ -1,6 +1,6 @@
 [package]
 name = "gitsift"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Git hunk sifter for code agents"
 license = "MIT"
@@ -21,3 +21,20 @@ similar     = { version = "2", features = ["text"] }
 assert_cmd = "2"
 predicates = "3"
 tempfile   = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Re-allow noisy pedantic lints
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"
+must_use_candidate      = "allow"
+missing_panics_doc      = "allow"
+similar_names           = "allow"
+unnecessary_wraps       = "allow"
+# Enforce specific lints
+cloned_instead_of_copied          = "deny"
+redundant_closure_for_method_calls = "deny"
+unnested_or_patterns              = "deny"

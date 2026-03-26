@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use git2::{Delta, DiffOptions, Repository};
+use git2::{Delta, Repository};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use super::{delta_path, hunk_header, is_binary_delta};
 use crate::models::{DiffOutput, FileChange, FileStatus, Hunk, HunkLine, LineTag};
 
 /// Generate a stable hunk ID from file path, old start line, and header.
@@ -20,7 +21,7 @@ pub fn hunk_id(file_path: &str, old_start: u32, header: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Map git2 Delta to our FileStatus.
+/// Map git2 Delta to our `FileStatus`.
 fn delta_to_status(delta: Delta) -> FileStatus {
     match delta {
         Delta::Added | Delta::Untracked => FileStatus::Added,
@@ -30,7 +31,7 @@ fn delta_to_status(delta: Delta) -> FileStatus {
     }
 }
 
-/// Mutable state shared across git2 foreach callbacks via RefCell.
+/// Mutable state shared across git2 foreach callbacks via `RefCell`.
 struct DiffState {
     files: Vec<FileChange>,
     current_file: Option<FileChange>,
@@ -39,11 +40,7 @@ struct DiffState {
 
 impl DiffState {
     fn new() -> Self {
-        Self {
-            files: Vec::new(),
-            current_file: None,
-            current_hunk: None,
-        }
+        Self { files: Vec::new(), current_file: None, current_hunk: None }
     }
 
     /// Flush current hunk into current file, then flush current file into files list.
@@ -76,18 +73,13 @@ impl DiffState {
 pub fn diff_unstaged(repo_path: &Path, file_filter: Option<&str>) -> Result<DiffOutput> {
     let repo = Repository::open(repo_path).context("failed to open git repository")?;
 
-    let mut opts = DiffOptions::new();
-    opts.context_lines(3);
-    opts.include_untracked(true);
-    opts.show_untracked_content(true);
-
+    let mut opts = super::diff_opts_with_untracked();
     if let Some(filter) = file_filter {
         opts.pathspec(filter);
     }
 
-    let diff = repo
-        .diff_index_to_workdir(None, Some(&mut opts))
-        .context("failed to generate diff")?;
+    let diff =
+        repo.diff_index_to_workdir(None, Some(&mut opts)).context("failed to generate diff")?;
 
     let state = RefCell::new(DiffState::new());
 
@@ -96,17 +88,12 @@ pub fn diff_unstaged(repo_path: &Path, file_filter: Option<&str>) -> Result<Diff
             let mut s = state.borrow_mut();
             s.flush_file();
 
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-
             // Skip binary files
-            if delta.new_file().is_binary() || delta.old_file().is_binary() {
+            if is_binary_delta(&delta) {
                 return true;
             }
+
+            let path = delta_path(&delta);
 
             s.current_file = Some(FileChange {
                 path,
@@ -120,13 +107,9 @@ pub fn diff_unstaged(repo_path: &Path, file_filter: Option<&str>) -> Result<Diff
             let mut s = state.borrow_mut();
             s.flush_hunk();
 
-            let file_path = s
-                .current_file
-                .as_ref()
-                .map(|f| f.path.as_str())
-                .unwrap_or("");
+            let file_path = s.current_file.as_ref().map_or("", |f| f.path.as_str());
 
-            let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+            let header = hunk_header(&hunk);
 
             s.current_hunk = Some(Hunk {
                 id: hunk_id(file_path, hunk.old_start(), &header),
@@ -143,11 +126,7 @@ pub fn diff_unstaged(repo_path: &Path, file_filter: Option<&str>) -> Result<Diff
         Some(&mut |_delta, _hunk, line| {
             let mut s = state.borrow_mut();
 
-            let tag = match line.origin() {
-                '+' | '>' => LineTag::Insert,
-                '-' | '<' => LineTag::Delete,
-                _ => LineTag::Equal,
-            };
+            let tag = LineTag::from_origin(line.origin());
 
             let content = String::from_utf8_lossy(line.content()).into_owned();
 
@@ -193,8 +172,7 @@ mod tests {
             index.write().unwrap();
             let tree_oid = index.write_tree().unwrap();
             let tree = repo.find_tree(tree_oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
 
         (dir, repo)
@@ -208,19 +186,15 @@ mod tests {
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&head])
-            .unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&head]).unwrap();
     }
 
     #[test]
     fn diff_modified_file() {
         let (dir, _repo) = setup_repo();
 
-        fs::write(
-            dir.path().join("hello.txt"),
-            "line 1\nline 2 modified\nline 3\nline 4\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("hello.txt"), "line 1\nline 2 modified\nline 3\nline 4\n")
+            .unwrap();
 
         let output = diff_unstaged(dir.path(), None).unwrap();
         assert_eq!(output.files.len(), 1);
@@ -252,10 +226,7 @@ mod tests {
         // Must have hunks with actual content (not empty)
         assert!(!new_file.hunks.is_empty(), "added file must have hunks");
         assert!(
-            new_file.hunks[0]
-                .lines
-                .iter()
-                .any(|l| l.tag == LineTag::Insert),
+            new_file.hunks[0].lines.iter().any(|l| l.tag == LineTag::Insert),
             "added file hunk must have insert lines"
         );
     }
@@ -335,11 +306,7 @@ mod tests {
 
         let output = diff_unstaged(dir.path(), None).unwrap();
         let big_file = output.files.iter().find(|f| f.path == "big.txt").unwrap();
-        assert!(
-            big_file.hunks.len() >= 2,
-            "expected 2+ hunks, got {}",
-            big_file.hunks.len()
-        );
+        assert!(big_file.hunks.len() >= 2, "expected 2+ hunks, got {}", big_file.hunks.len());
 
         // Each hunk should have a unique ID
         let ids: Vec<&str> = big_file.hunks.iter().map(|h| h.id.as_str()).collect();
@@ -361,11 +328,7 @@ mod tests {
     fn diff_line_numbers_correct() {
         let (dir, _repo) = setup_repo();
 
-        fs::write(
-            dir.path().join("hello.txt"),
-            "line 1\nINSERTED\nline 2\nline 3\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("hello.txt"), "line 1\nINSERTED\nline 2\nline 3\n").unwrap();
 
         let output = diff_unstaged(dir.path(), None).unwrap();
         let hunk = &output.files[0].hunks[0];
@@ -376,10 +339,7 @@ mod tests {
             .find(|l| l.tag == LineTag::Insert && l.content.contains("INSERTED"))
             .expect("should find inserted line");
 
-        assert!(
-            inserted.old_lineno.is_none(),
-            "insert has no old line number"
-        );
+        assert!(inserted.old_lineno.is_none(), "insert has no old line number");
         assert!(inserted.new_lineno.is_some(), "insert has new line number");
     }
 }

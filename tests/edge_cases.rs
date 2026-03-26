@@ -1,39 +1,13 @@
 //! Edge case and cross-cutting integration tests for gitsift.
 //! Covers scenarios not tested in individual module tests.
 
-use assert_cmd::Command;
+mod common;
+
+use common::{gitsift, parse_json, setup_repo};
 use git2::{Repository, Signature};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
-
-fn setup_repo() -> TempDir {
-    let dir = TempDir::new().unwrap();
-    let repo = Repository::init(dir.path()).unwrap();
-    let sig = Signature::now("test", "test@test.com").unwrap();
-
-    fs::write(dir.path().join("hello.txt"), "line 1\nline 2\nline 3\n").unwrap();
-
-    {
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("hello.txt")).unwrap();
-        index.write().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-            .unwrap();
-    }
-
-    dir
-}
-
-fn gitsift() -> Command {
-    Command::cargo_bin("gitsift").unwrap()
-}
-
-fn parse_json(stdout: &[u8]) -> serde_json::Value {
-    serde_json::from_slice(stdout).unwrap()
-}
 
 // ===== Binary files =====
 
@@ -44,11 +18,8 @@ fn binary_file_skipped_in_diff() {
     // Create a binary file (contains null bytes)
     fs::write(dir.path().join("image.png"), b"\x89PNG\r\n\x1a\n\x00\x00").unwrap();
 
-    let output = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let output =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
 
     assert!(output.status.success());
     let val = parse_json(&output.stdout);
@@ -97,22 +68,16 @@ fn deleted_file_diff_and_status() {
     fs::remove_file(dir.path().join("hello.txt")).unwrap();
 
     // Diff should show deleted file
-    let diff_out = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let diff_val = parse_json(&diff_out.stdout);
     let file = &diff_val["data"]["files"][0];
     assert_eq!(file["status"], "deleted");
     assert_eq!(file["path"], "hello.txt");
 
     // Status should show 1 unstaged file
-    let status_out = gitsift()
-        .args(["status", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let status_out =
+        gitsift().args(["status", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let status_val = parse_json(&status_out.stdout);
     assert_eq!(status_val["data"]["unstaged_files"], 1);
 }
@@ -125,11 +90,8 @@ fn new_file_diff_shows_added() {
 
     fs::write(dir.path().join("new_feature.rs"), "fn main() {}\n").unwrap();
 
-    let output = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let output =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let val = parse_json(&output.stdout);
     let new_file = val["data"]["files"]
         .as_array()
@@ -152,15 +114,10 @@ fn stage_from_stdin_json() {
     fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
 
     // Get hunk ID
-    let diff_out = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let diff_val = parse_json(&diff_out.stdout);
-    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"]
-        .as_str()
-        .unwrap();
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
 
     // Stage via --from-stdin with JSON payload
     let stdin_json = format!(r#"{{"hunk_ids": ["{hunk_id}"]}}"#);
@@ -193,8 +150,7 @@ fn multi_file_selective_staging() {
         let tree_oid = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_oid).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "add second", &tree, &[&head])
-            .unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "add second", &tree, &[&head]).unwrap();
     }
 
     // Modify both files
@@ -202,11 +158,8 @@ fn multi_file_selective_staging() {
     fs::write(dir.path().join("second.txt"), "second changed\n").unwrap();
 
     // Get diff — should have 2 files
-    let diff_out = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let diff_val = parse_json(&diff_out.stdout);
     let files = diff_val["data"]["files"].as_array().unwrap();
     assert_eq!(files.len(), 2);
@@ -224,21 +177,15 @@ fn multi_file_selective_staging() {
     assert_eq!(stage_val["data"]["staged"], 1);
 
     // Status: 1 staged (hello.txt), 1 unstaged (second.txt)
-    let status_out = gitsift()
-        .args(["status", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let status_out =
+        gitsift().args(["status", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let status_val = parse_json(&status_out.stdout);
     assert_eq!(status_val["data"]["staged_files"], 1);
     assert_eq!(status_val["data"]["unstaged_files"], 1);
 
     // Diff should only show second.txt remaining
-    let diff2_out = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let diff2_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     let diff2_val = parse_json(&diff2_out.stdout);
     let remaining = diff2_val["data"]["files"].as_array().unwrap();
     assert_eq!(remaining.len(), 1);
@@ -265,9 +212,7 @@ fn protocol_session_diff_stage_status_diff() {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let hunk_id = diff_lines[0]["data"]["files"][0]["hunks"][0]["id"]
-        .as_str()
-        .unwrap();
+    let hunk_id = diff_lines[0]["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
 
     // Step 2: stage via protocol
     let stage_stdin =
@@ -326,21 +271,15 @@ fn empty_repo_all_commands_work() {
     let _repo = Repository::init(dir.path()).unwrap();
 
     // diff
-    let diff_out = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     assert!(diff_out.status.success());
     let diff_val = parse_json(&diff_out.stdout);
     assert_eq!(diff_val["data"]["total_hunks"], 0);
 
     // status
-    let status_out = gitsift()
-        .args(["status", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let status_out =
+        gitsift().args(["status", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     assert!(status_out.status.success());
     let status_val = parse_json(&status_out.stdout);
     assert_eq!(status_val["data"]["staged_files"], 0);
@@ -353,11 +292,8 @@ fn empty_repo_all_commands_work() {
 fn clean_repo_diff_returns_empty() {
     let dir = setup_repo();
 
-    let output = gitsift()
-        .args(["diff", "--format", "json", "--repo"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let output =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
     assert!(output.status.success());
     let val = parse_json(&output.stdout);
     assert_eq!(val["data"]["total_hunks"], 0);
