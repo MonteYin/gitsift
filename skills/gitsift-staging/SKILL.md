@@ -6,7 +6,11 @@ user_invocable: true
 
 # Selective Staging with gitsift
 
-gitsift is a CLI tool that replaces `git add -p` with structured JSON output. It lets you stage individual hunks or even specific lines from unstaged changes — perfect for creating clean, atomic commits.
+gitsift is a CLI tool that replaces `git add -p` with structured output. It lets you stage individual hunks or even specific lines from unstaged changes — perfect for creating clean, atomic commits.
+
+**Output formats**: gitsift supports two formats via `--format`:
+- `toon` — compact, token-efficient format (default). ~40% fewer tokens than JSON.
+- `json` — full JSON with all fields and context lines. Use `--format json` when you need structured data for parsing or line-level staging.
 
 ## Before You Start
 
@@ -19,26 +23,40 @@ The workflow is always: **diff → decide → stage → verify → commit**.
 ### 1. See what changed
 
 ```bash
-gitsift diff --format json
+gitsift diff
 ```
 
-This returns all unstaged changes as structured JSON. Each change is organized as files → hunks → lines, and every hunk has a unique ID you'll use for staging.
+This returns all unstaged changes in compact (toon) format. Each change is organized as files → hunks → lines, and every hunk has a unique ID you'll use for staging.
 
 To focus on a specific file:
 ```bash
-gitsift diff --format json --file src/main.rs
-```
-
-For a quick human-readable overview (useful to show the user):
-```bash
-gitsift diff --format human
+gitsift diff --file src/main.rs
 ```
 
 ### 2. Decide what to stage
 
 Look at the diff output and identify which hunks or lines belong together logically. Think about what makes a clean, atomic commit — group related changes together.
 
-The JSON structure looks like this:
+**Compact (toon) format** — default, ~40% fewer tokens than JSON:
+```
+version: 1
+ok: true
+total_hunks: 1
+files[1]:
+  - path: src/lib.rs
+    status: modified
+    hunks[1]:
+      - id: 59a9050fd4195c94
+        header: @@ -1,5 +1,7 @@
+        old_start: 1 old_lines: 5 new_start: 1 new_lines: 7
+        lines[2]{tag,content,old,new}:
+          -,old line\n,2,
+          +,new line\n,,2
+```
+
+Key differences from JSON: context lines (unchanged) are stripped, `file_path` is not repeated in hunks, and lines use tabular CSV rows with a schema header `{tag,content,old,new}:`.
+
+**JSON format** — use `--format json` when needed:
 ```json
 {
   "version": 1, "ok": true,
@@ -93,7 +111,7 @@ echo '{"line_selections": [{"hunk_id": "59a9050fd4195c94", "line_indices": [1, 2
 
 Check what's staged vs unstaged:
 ```bash
-gitsift status --format json
+gitsift status
 ```
 
 Then commit as usual:
@@ -123,8 +141,8 @@ Each response is a single JSON line with the same `Response` envelope. Errors (i
 
 **New/untracked files break staging — even for other files.** If the diff contains any untracked files (status: `added`), `gitsift stage` will fail for ALL hunks — not just the untracked ones. The error is "index does not contain". The fix: always `git add` new/untracked files first before running `gitsift stage`. Recommended pattern:
 ```bash
-# 1. Check for untracked files in diff
-gitsift diff --format json | python3 -c "import sys,json; [print(f['path']) for f in json.load(sys.stdin)['data']['files'] if f['status']=='added']"
+# 1. Check for untracked files in diff output (look for status: added)
+gitsift diff
 # 2. git add any untracked files first
 git add <new-files>
 # 3. Now gitsift stage works for the remaining tracked-file hunks
@@ -137,7 +155,7 @@ gitsift stage --hunk-ids <id>
 
 **One mode per request.** Either `hunk_ids` or `line_selections`, never both at once. The API rejects mixed requests — use separate calls if you need both.
 
-**Line indices are 0-based** into the hunk's `lines` array. Look at the `tag` field to identify which lines are changes (`delete`/`insert`) vs context (`equal`). Only selecting context lines will be rejected.
+**Line indices are 0-based** into the hunk's `lines` array (from `--format json` output, which includes all lines). Look at the `tag` field to identify which lines are changes (`delete`/`insert`) vs context (`equal`). Only selecting context lines will be rejected. Note: compact (toon) output already strips context lines — use `--format json` when you need line indices for `--from-stdin`.
 
 ## Example: Splitting a Feature and a Bugfix
 
@@ -145,7 +163,7 @@ Say you modified `app.rs` and it has 3 hunks: a bugfix (hunk 1), a new feature (
 
 ```bash
 # 1. See all changes
-gitsift diff --format json --file app.rs
+gitsift diff --file app.rs
 # → 3 hunks with IDs: aaa111, bbb222, ccc333
 
 # 2. Stage just the bugfix
@@ -153,7 +171,7 @@ gitsift stage --hunk-ids aaa111
 git commit -m "fix: resolve null pointer in error handler"
 
 # 3. Re-diff for the feature (IDs may have changed!)
-gitsift diff --format json --file app.rs
+gitsift diff --file app.rs
 # → 2 hunks with IDs: ddd444, eee555
 
 # 4. Stage the feature
@@ -163,22 +181,25 @@ git commit -m "feat: add retry logic for API calls"
 
 ## Response Format
 
-All gitsift JSON responses share this envelope:
-```json
-{"version": 1, "ok": true, "data": { ... }}
+**Compact (toon) format** — default:
+```
+version: 1
+ok: true
+staged: 2
+failed: 0
 ```
 
-On error:
-```json
-{"version": 1, "ok": false, "error": "description of what went wrong"}
-```
-
-Stage results include counts:
+**JSON format** — use `--format json`:
 ```json
 {"version": 1, "ok": true, "data": {"staged": 2, "failed": 0}}
 ```
 
-If some IDs were invalid:
+On error (JSON):
+```json
+{"version": 1, "ok": false, "error": "description of what went wrong"}
+```
+
+If some IDs were invalid (JSON):
 ```json
 {"version": 1, "ok": true, "data": {"staged": 1, "failed": 1, "errors": ["hunk ID not found: badid"]}}
 ```

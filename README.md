@@ -99,7 +99,7 @@ ok: true
 total_hunks: 1
 files[1]:
   - path: src/main.rs
-    status: Modified
+    status: modified
     hunks[1]:
       - id: 59a9050fd4195c94
         header: @@ -1,5 +1,7 @@
