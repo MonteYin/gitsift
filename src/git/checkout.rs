@@ -264,23 +264,34 @@ pub fn checkout_unstaged(repo_path: &Path, request: &CheckoutRequest) -> Result<
         }
     }
 
-    // Delete untracked files
+    // Delete untracked files (with path traversal guard)
+    let repo_root = repo_path.canonicalize().context("failed to canonicalize repo path")?;
     for path in &untracked_paths {
         let full_path = repo_path.join(path);
-        if full_path.exists() {
-            std::fs::remove_file(&full_path)
-                .with_context(|| format!("failed to delete untracked file: {path}"))?;
+        let canonical =
+            full_path.canonicalize().with_context(|| format!("failed to resolve path: {path}"))?;
+        if !canonical.starts_with(&repo_root) {
+            errors.push(format!("path escapes repository boundary: {path}"));
+            failed += 1;
+            untracked_hunk_count -= 1;
+            continue;
         }
+        std::fs::remove_file(&canonical)
+            .with_context(|| format!("failed to delete untracked file: {path}"))?;
     }
     discarded += untracked_hunk_count;
 
-    // For tracked hunks, collect full hunk data and apply reverse patches
+    // For tracked hunks, collect full hunk data and apply all reverse patches atomically
     if !tracked_ids.is_empty() {
         let mut opts = super::diff_opts_with_untracked();
         let diff =
             repo.diff_index_to_workdir(None, Some(&mut opts)).context("failed to generate diff")?;
 
         let hunks = collect_hunks_from_diff(&diff)?;
+
+        // Build a single combined patch from all valid hunks
+        let mut combined_patch = String::new();
+        let mut valid_count = 0usize;
 
         for hunk_id in &tracked_ids {
             match hunks.get(hunk_id) {
@@ -289,23 +300,18 @@ pub fn checkout_unstaged(repo_path: &Path, request: &CheckoutRequest) -> Result<
                     failed += 1;
                 }
                 Some(raw) => {
-                    let patch_str = reconstruct_reverse_patch(raw);
-                    match Diff::from_buffer(patch_str.as_bytes()) {
-                        Ok(patch_diff) => {
-                            repo.apply(&patch_diff, ApplyLocation::WorkDir, None).with_context(
-                                || format!("failed to apply reverse patch for hunk {hunk_id}"),
-                            )?;
-                            discarded += 1;
-                        }
-                        Err(e) => {
-                            errors.push(format!(
-                                "failed to parse reverse patch for hunk {hunk_id}: {e}"
-                            ));
-                            failed += 1;
-                        }
-                    }
+                    combined_patch.push_str(&reconstruct_reverse_patch(raw));
+                    valid_count += 1;
                 }
             }
+        }
+
+        if valid_count > 0 {
+            let patch_diff = Diff::from_buffer(combined_patch.as_bytes())
+                .context("failed to parse combined reverse patch")?;
+            repo.apply(&patch_diff, ApplyLocation::WorkDir, None)
+                .context("failed to apply reverse patches to working tree")?;
+            discarded += valid_count;
         }
     }
 
@@ -367,7 +373,7 @@ pub fn checkout_staged(repo_path: &Path, request: &CheckoutRequest) -> Result<Ch
         discarded += added_hunk_count;
     }
 
-    // For modified files, collect staged hunk data and apply reverse patches to the index
+    // For modified files, collect staged hunk data and apply all reverse patches atomically
     if !modified_ids.is_empty() {
         let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
 
@@ -378,6 +384,10 @@ pub fn checkout_staged(repo_path: &Path, request: &CheckoutRequest) -> Result<Ch
 
         let hunks = collect_hunks_from_diff(&diff)?;
 
+        // Build a single combined patch from all valid hunks
+        let mut combined_patch = String::new();
+        let mut valid_count = 0usize;
+
         for hunk_id in &modified_ids {
             match hunks.get(hunk_id) {
                 None => {
@@ -385,27 +395,18 @@ pub fn checkout_staged(repo_path: &Path, request: &CheckoutRequest) -> Result<Ch
                     failed += 1;
                 }
                 Some(raw) => {
-                    let patch_str = reconstruct_reverse_patch(raw);
-                    match Diff::from_buffer(patch_str.as_bytes()) {
-                        Ok(patch_diff) => {
-                            repo.apply(&patch_diff, ApplyLocation::Index, None).with_context(
-                                || {
-                                    format!(
-                                        "failed to apply reverse patch to index for hunk {hunk_id}"
-                                    )
-                                },
-                            )?;
-                            discarded += 1;
-                        }
-                        Err(e) => {
-                            errors.push(format!(
-                                "failed to parse reverse patch for hunk {hunk_id}: {e}"
-                            ));
-                            failed += 1;
-                        }
-                    }
+                    combined_patch.push_str(&reconstruct_reverse_patch(raw));
+                    valid_count += 1;
                 }
             }
+        }
+
+        if valid_count > 0 {
+            let patch_diff = Diff::from_buffer(combined_patch.as_bytes())
+                .context("failed to parse combined reverse patch")?;
+            repo.apply(&patch_diff, ApplyLocation::Index, None)
+                .context("failed to apply reverse patches to index")?;
+            discarded += valid_count;
         }
     }
 
