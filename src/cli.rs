@@ -19,11 +19,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List all unstaged hunks
+    /// List unstaged hunks (or staged hunks with --staged)
     Diff {
         /// Filter by file path
         #[arg(short, long)]
         file: Option<PathBuf>,
+
+        /// Show staged changes (HEAD vs index) instead of unstaged
+        #[arg(long)]
+        staged: bool,
     },
     /// Stage selected hunks or lines
     Stage {
@@ -34,6 +38,20 @@ pub enum Commands {
         /// Read JSON selection from stdin
         #[arg(long)]
         from_stdin: bool,
+    },
+    /// Discard selected hunks (unstaged by default, or staged with --staged)
+    Checkout {
+        /// Hunk IDs to discard (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        hunk_ids: Option<Vec<String>>,
+
+        /// Read JSON selection from stdin
+        #[arg(long)]
+        from_stdin: bool,
+
+        /// Discard staged changes (index → HEAD) instead of unstaged (workdir → index)
+        #[arg(long)]
+        staged: bool,
     },
     /// Show staging status summary
     Status,

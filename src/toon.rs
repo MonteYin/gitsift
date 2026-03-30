@@ -71,6 +71,23 @@ pub fn format_diff(output: &DiffOutput) -> String {
     buf
 }
 
+/// Format a checkout result response in compact format.
+pub fn format_checkout_result(result: &crate::models::CheckoutResult) -> String {
+    let resp = Response::success(result);
+    let mut buf = String::new();
+    writeln!(buf, "version: {}", resp.version).unwrap();
+    writeln!(buf, "ok: true").unwrap();
+    writeln!(buf, "discarded: {}", result.discarded).unwrap();
+    writeln!(buf, "failed: {}", result.failed).unwrap();
+    if !result.errors.is_empty() {
+        writeln!(buf, "errors[{}]:", result.errors.len()).unwrap();
+        for err in &result.errors {
+            writeln!(buf, "  - {err}").unwrap();
+        }
+    }
+    buf
+}
+
 /// Format a stage result response in compact format.
 pub fn format_stage_result(result: &StageResult) -> String {
     let resp = Response::success(result);

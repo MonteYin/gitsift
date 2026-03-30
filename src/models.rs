@@ -106,6 +106,23 @@ pub struct StageResult {
     pub errors: Vec<String>,
 }
 
+/// Input for `gitsift checkout`.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckoutRequest {
+    /// Discard entire hunks by ID.
+    #[serde(default)]
+    pub hunk_ids: Vec<String>,
+}
+
+/// Result of a checkout (discard) operation.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckoutResult {
+    pub discarded: usize,
+    pub failed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub errors: Vec<String>,
+}
+
 /// Protocol response version. Increment on breaking schema changes.
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -143,12 +160,28 @@ pub enum ProtocolRequest {
     Stage {
         params: StageRequest,
     },
+    Checkout {
+        params: CheckoutParams,
+    },
     Status,
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiffParams {
     pub file: Option<String>,
+    /// If true, show staged changes (HEAD vs index) instead of unstaged.
+    #[serde(default)]
+    pub staged: bool,
+}
+
+/// Parameters for the checkout protocol method.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckoutParams {
+    #[serde(default)]
+    pub hunk_ids: Vec<String>,
+    /// If true, discard staged changes (index → HEAD). Default: discard unstaged (workdir → index).
+    #[serde(default)]
+    pub staged: bool,
 }
 
 /// Staging status summary.
@@ -432,11 +465,42 @@ mod tests {
     }
 
     #[test]
+    fn protocol_request_checkout_parse() {
+        let json = r#"{"method": "checkout", "params": {"hunk_ids": ["a1"], "staged": true}}"#;
+        let req: ProtocolRequest = serde_json::from_str(json).unwrap();
+        match req {
+            ProtocolRequest::Checkout { params } => {
+                assert_eq!(params.hunk_ids, vec!["a1"]);
+                assert!(params.staged);
+            }
+            _ => panic!("expected Checkout variant"),
+        }
+    }
+
+    #[test]
+    fn protocol_request_diff_staged_parse() {
+        let json = r#"{"method": "diff", "params": {"staged": true}}"#;
+        let req: ProtocolRequest = serde_json::from_str(json).unwrap();
+        match req {
+            ProtocolRequest::Diff { params } => {
+                assert!(params.staged);
+                assert_eq!(params.file, None);
+            }
+            _ => panic!("expected Diff variant"),
+        }
+    }
+
+    #[test]
     fn protocol_request_roundtrip() {
         let requests = vec![
-            ProtocolRequest::Diff { params: DiffParams { file: Some("test.rs".into()) } },
+            ProtocolRequest::Diff {
+                params: DiffParams { file: Some("test.rs".into()), staged: false },
+            },
             ProtocolRequest::Stage {
                 params: StageRequest { hunk_ids: vec!["id1".into()], line_selections: vec![] },
+            },
+            ProtocolRequest::Checkout {
+                params: CheckoutParams { hunk_ids: vec!["id2".into()], staged: false },
             },
             ProtocolRequest::Status,
         ];
@@ -445,5 +509,30 @@ mod tests {
             let back: ProtocolRequest = serde_json::from_str(&json).unwrap();
             assert_eq!(*req, back);
         }
+    }
+
+    // --- CheckoutRequest round-trip ---
+
+    #[test]
+    fn checkout_request_roundtrip() {
+        let req = CheckoutRequest { hunk_ids: vec!["abc".into(), "def".into()] };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: CheckoutRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn checkout_result_roundtrip() {
+        let result = CheckoutResult { discarded: 2, failed: 1, errors: vec!["not found".into()] };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CheckoutResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, back);
+    }
+
+    #[test]
+    fn checkout_result_no_errors_omits_field() {
+        let result = CheckoutResult { discarded: 1, failed: 0, errors: vec![] };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("errors"));
     }
 }

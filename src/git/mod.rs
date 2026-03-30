@@ -1,5 +1,6 @@
 use git2::DiffOptions;
 
+pub mod checkout;
 pub mod diff;
 pub mod stage;
 pub mod status;

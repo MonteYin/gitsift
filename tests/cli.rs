@@ -142,6 +142,7 @@ fn help_shows_subcommands() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("diff"));
     assert!(stdout.contains("stage"));
+    assert!(stdout.contains("checkout"));
     assert!(stdout.contains("status"));
     assert!(stdout.contains("protocol"));
 }
@@ -285,4 +286,207 @@ fn json_format_preserves_context_lines() {
     let lines = val["data"]["files"][0]["hunks"][0]["lines"].as_array().unwrap();
     let has_equal = lines.iter().any(|l| l["tag"] == "equal");
     assert!(has_equal, "JSON format should preserve context lines");
+}
+
+// ===== checkout subcommand =====
+
+#[test]
+fn checkout_unstaged_hunk_by_id() {
+    let dir = setup_repo();
+    let original = fs::read_to_string(dir.path().join("hello.txt")).unwrap();
+    fs::write(dir.path().join("hello.txt"), "completely changed\n").unwrap();
+
+    // Get hunk ID
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    // Checkout (discard)
+    let checkout_out = gitsift()
+        .args(["checkout", "--hunk-ids", hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(checkout_out.status.success());
+    let val = parse_json(&checkout_out.stdout);
+    assert_eq!(val["ok"], true);
+    assert_eq!(val["data"]["discarded"], 1);
+    assert_eq!(val["data"]["failed"], 0);
+
+    // File should be restored
+    let restored = fs::read_to_string(dir.path().join("hello.txt")).unwrap();
+    assert_eq!(restored, original);
+}
+
+#[test]
+fn checkout_unstaged_invalid_id() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let output = gitsift()
+        .args(["checkout", "--hunk-ids", "bogus", "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let val = parse_json(&output.stdout);
+    assert_eq!(val["data"]["discarded"], 0);
+    assert_eq!(val["data"]["failed"], 1);
+}
+
+#[test]
+fn checkout_unstaged_toon_output() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    let output = gitsift()
+        .args(["checkout", "--hunk-ids", hunk_id, "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let out = stdout_str(&output.stdout);
+    assert!(out.contains("ok: true"));
+    assert!(out.contains("discarded: 1"));
+    assert!(out.contains("failed: 0"));
+}
+
+#[test]
+fn checkout_staged_hunk() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    // Stage the change first
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    gitsift()
+        .args(["stage", "--hunk-ids", hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    // Get staged hunk ID
+    let staged_diff = gitsift()
+        .args(["diff", "--staged", "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let staged_val = parse_json(&staged_diff.stdout);
+    assert!(staged_val["data"]["total_hunks"].as_u64().unwrap() > 0);
+    let staged_hunk_id = staged_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    // Checkout staged
+    let checkout_out = gitsift()
+        .args(["checkout", "--staged", "--hunk-ids", staged_hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(checkout_out.status.success());
+    let val = parse_json(&checkout_out.stdout);
+    assert_eq!(val["data"]["discarded"], 1);
+
+    // No more staged changes
+    let status_out =
+        gitsift().args(["status", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let status_val = parse_json(&status_out.stdout);
+    assert_eq!(status_val["data"]["staged_hunks"], 0);
+}
+
+// ===== diff --staged subcommand =====
+
+#[test]
+fn diff_staged_json_output() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    // Stage it
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    gitsift()
+        .args(["stage", "--hunk-ids", hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    // diff --staged should show the staged change
+    let staged_out = gitsift()
+        .args(["diff", "--staged", "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(staged_out.status.success());
+    let val = parse_json(&staged_out.stdout);
+    assert_eq!(val["ok"], true);
+    assert!(val["data"]["total_hunks"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn diff_staged_empty_when_nothing_staged() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let output = gitsift()
+        .args(["diff", "--staged", "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let val = parse_json(&output.stdout);
+    assert_eq!(val["data"]["total_hunks"], 0);
+}
+
+// ===== full checkout workflow E2E =====
+
+#[test]
+fn full_workflow_diff_checkout_verify() {
+    let dir = setup_repo();
+    let original = fs::read_to_string(dir.path().join("hello.txt")).unwrap();
+    fs::write(dir.path().join("hello.txt"), "line 1\nchanged\nline 3\n").unwrap();
+
+    // 1. Diff
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    // 2. Checkout
+    let checkout_out = gitsift()
+        .args(["checkout", "--hunk-ids", hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(checkout_out.status.success());
+    let val = parse_json(&checkout_out.stdout);
+    assert_eq!(val["data"]["discarded"], 1);
+
+    // 3. Diff again — should be clean
+    let diff2_out = gitsift()
+        .args(["diff", "--format", "json", "--file", "hello.txt", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let diff2_val = parse_json(&diff2_out.stdout);
+    assert_eq!(diff2_val["data"]["total_hunks"], 0);
+
+    // 4. File matches original
+    let restored = fs::read_to_string(dir.path().join("hello.txt")).unwrap();
+    assert_eq!(restored, original);
 }

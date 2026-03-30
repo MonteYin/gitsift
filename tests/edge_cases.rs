@@ -299,3 +299,90 @@ fn clean_repo_diff_returns_empty() {
     assert_eq!(val["data"]["total_hunks"], 0);
     assert_eq!(val["data"]["files"].as_array().unwrap().len(), 0);
 }
+
+// ===== Checkout edge cases =====
+
+#[test]
+fn checkout_untracked_file_deletes_it() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("untracked.txt"), "new stuff\n").unwrap();
+
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let untracked = diff_val["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "untracked.txt")
+        .unwrap();
+    let hunk_id = untracked["hunks"][0]["id"].as_str().unwrap();
+
+    let checkout_out = gitsift()
+        .args(["checkout", "--hunk-ids", hunk_id, "--format", "json", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(checkout_out.status.success());
+    let val = parse_json(&checkout_out.stdout);
+    assert_eq!(val["data"]["discarded"], 1);
+
+    assert!(!dir.path().join("untracked.txt").exists());
+}
+
+#[test]
+fn checkout_from_stdin_json() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    let diff_out =
+        gitsift().args(["diff", "--format", "json", "--repo"]).arg(dir.path()).output().unwrap();
+    let diff_val = parse_json(&diff_out.stdout);
+    let hunk_id = diff_val["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    let stdin_json = format!(r#"{{"hunk_ids": ["{hunk_id}"]}}"#);
+    let checkout_out = gitsift()
+        .args(["checkout", "--from-stdin", "--format", "json", "--repo"])
+        .arg(dir.path())
+        .write_stdin(stdin_json)
+        .output()
+        .unwrap();
+
+    assert!(checkout_out.status.success());
+    let val = parse_json(&checkout_out.stdout);
+    assert_eq!(val["data"]["discarded"], 1);
+}
+
+#[test]
+fn protocol_checkout_method() {
+    let dir = setup_repo();
+    fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+    // Get hunk ID via protocol diff
+    let diff_out = gitsift()
+        .args(["protocol", "--repo"])
+        .arg(dir.path())
+        .write_stdin("{\"method\": \"diff\"}\n")
+        .output()
+        .unwrap();
+    let diff_resp: serde_json::Value =
+        serde_json::from_str(String::from_utf8(diff_out.stdout).unwrap().lines().next().unwrap())
+            .unwrap();
+    let hunk_id = diff_resp["data"]["files"][0]["hunks"][0]["id"].as_str().unwrap();
+
+    // Checkout via protocol
+    let checkout_stdin =
+        format!("{{\"method\": \"checkout\", \"params\": {{\"hunk_ids\": [\"{hunk_id}\"]}}}}\n");
+    let checkout_out = gitsift()
+        .args(["protocol", "--repo"])
+        .arg(dir.path())
+        .write_stdin(checkout_stdin)
+        .output()
+        .unwrap();
+    let checkout_resp: serde_json::Value = serde_json::from_str(
+        String::from_utf8(checkout_out.stdout).unwrap().lines().next().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checkout_resp["ok"], true);
+    assert_eq!(checkout_resp["data"]["discarded"], 1);
+}

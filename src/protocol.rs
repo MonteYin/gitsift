@@ -100,10 +100,22 @@ pub fn run_protocol(repo_path: &Path) -> Result<()> {
 
         let write_ok = match request {
             ProtocolRequest::Diff { params } => {
-                dispatch(&mut out, git::diff::diff_unstaged(repo_path, params.file.as_deref()))
+                if params.staged {
+                    dispatch(&mut out, git::diff::diff_staged(repo_path, params.file.as_deref()))
+                } else {
+                    dispatch(&mut out, git::diff::diff_unstaged(repo_path, params.file.as_deref()))
+                }
             }
             ProtocolRequest::Stage { params } => {
                 dispatch(&mut out, git::stage::stage_selection(repo_path, &params))
+            }
+            ProtocolRequest::Checkout { params } => {
+                let request = crate::models::CheckoutRequest { hunk_ids: params.hunk_ids.clone() };
+                if params.staged {
+                    dispatch(&mut out, git::checkout::checkout_staged(repo_path, &request))
+                } else {
+                    dispatch(&mut out, git::checkout::checkout_unstaged(repo_path, &request))
+                }
             }
             ProtocolRequest::Status => dispatch(&mut out, git::status::get_status(repo_path)),
         };
