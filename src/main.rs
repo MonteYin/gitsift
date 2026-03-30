@@ -13,8 +13,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Diff { file } => {
-            let diff = git::diff::diff_unstaged(&cli.repo, file.as_ref().and_then(|f| f.to_str()))?;
+        Commands::Diff { file, staged } => {
+            let file_filter = file.as_ref().and_then(|f| f.to_str());
+            let diff = if *staged {
+                git::diff::diff_staged(&cli.repo, file_filter)?
+            } else {
+                git::diff::diff_unstaged(&cli.repo, file_filter)?
+            };
             output::print_diff(&diff, &cli.format);
         }
         Commands::Stage { hunk_ids, from_stdin } => {
@@ -28,6 +33,19 @@ fn main() -> Result<()> {
             };
             let result = git::stage::stage_selection(&cli.repo, &request)?;
             output::print_stage_result(&result, &cli.format);
+        }
+        Commands::Checkout { hunk_ids, from_stdin, staged } => {
+            let request = if *from_stdin {
+                serde_json::from_reader(std::io::stdin())?
+            } else {
+                models::CheckoutRequest { hunk_ids: hunk_ids.clone().unwrap_or_default() }
+            };
+            let result = if *staged {
+                git::checkout::checkout_staged(&cli.repo, &request)?
+            } else {
+                git::checkout::checkout_unstaged(&cli.repo, &request)?
+            };
+            output::print_checkout_result(&result, &cli.format);
         }
         Commands::Status => {
             let status = git::status::get_status(&cli.repo)?;

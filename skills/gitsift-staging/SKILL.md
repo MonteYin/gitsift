@@ -1,12 +1,12 @@
 ---
 name: gitsift-staging
-description: "Selective git staging with gitsift — stage specific hunks or individual lines instead of entire files. Use this skill whenever the user needs to split changes into multiple commits, stage only part of their work, create atomic commits from a large diff, cherry-pick specific changes to stage, or do anything that resembles `git add -p` but with structured control. Trigger phrases include: 'stage only the bug fix', 'commit these separately', 'only stage lines X-Y', 'split this into two commits', 'don't stage everything', 'only commit the tests', 'separate the formatting from the logic', 'partial staging', 'I want to pick which changes to commit', 'selective commit'."
+description: "Selective git staging and checkout with gitsift — stage or discard specific hunks or individual lines instead of entire files. Use this skill whenever the user needs to split changes into multiple commits, stage only part of their work, create atomic commits from a large diff, cherry-pick specific changes to stage, discard specific hunks, undo certain changes selectively, revert part of their work, or do anything that resembles `git add -p` or `git checkout -p` but with structured control. Trigger phrases include: 'stage only the bug fix', 'commit these separately', 'only stage lines X-Y', 'split this into two commits', 'don't stage everything', 'only commit the tests', 'separate the formatting from the logic', 'partial staging', 'I want to pick which changes to commit', 'selective commit', 'discard this hunk', 'revert only that change', 'undo the formatting changes', 'unstage this hunk', 'throw away this change'."
 user_invocable: true
 ---
 
-# Selective Staging with gitsift
+# Selective Staging and Checkout with gitsift
 
-gitsift is a CLI tool that replaces `git add -p` with structured output. It lets you stage individual hunks or even specific lines from unstaged changes — perfect for creating clean, atomic commits.
+gitsift is a CLI tool that replaces `git add -p` and `git checkout -p` with structured output. It lets you stage or discard individual hunks or even specific lines — perfect for creating clean, atomic commits and selectively reverting changes.
 
 **Output formats**: gitsift supports two formats via `--format`:
 - `toon` — compact, token-efficient format (default). ~40% fewer tokens than JSON.
@@ -18,7 +18,9 @@ Run `gitsift --version` to confirm it's installed. If not, see https://github.co
 
 ## Core Workflow
 
-The workflow is always: **diff → decide → stage → verify → commit**.
+### Staging workflow: **diff → decide → stage → verify → commit**
+
+### Checkout (discard) workflow: **diff → decide → checkout → verify**
 
 ### 1. See what changed
 
@@ -26,11 +28,16 @@ The workflow is always: **diff → decide → stage → verify → commit**.
 gitsift diff
 ```
 
-This returns all unstaged changes in compact (toon) format. Each change is organized as files → hunks → lines, and every hunk has a unique ID you'll use for staging.
+This returns all unstaged changes in compact (toon) format. Each change is organized as files → hunks → lines, and every hunk has a unique ID you'll use for staging or checkout.
 
 To focus on a specific file:
 ```bash
 gitsift diff --file src/main.rs
+```
+
+To see staged changes (what's in the index vs HEAD):
+```bash
+gitsift diff --staged
 ```
 
 ### 2. Decide what to stage
@@ -107,7 +114,26 @@ echo '{"line_selections": [{"hunk_id": "59a9050fd4195c94", "line_indices": [1, 2
 
 **Important**: you cannot mix `hunk_ids` and `line_selections` in one request. If you need both, make two separate calls.
 
-### 5. Verify and commit
+### 5. Discard unwanted hunks (checkout)
+
+To discard specific unstaged hunks (revert working tree → index):
+```bash
+gitsift checkout --hunk-ids abc123,def456
+```
+
+To discard specific staged hunks (revert index → HEAD):
+```bash
+gitsift checkout --staged --hunk-ids abc123
+```
+
+To discard via JSON stdin:
+```bash
+echo '{"hunk_ids": ["abc123"]}' | gitsift checkout --from-stdin
+```
+
+**Note**: Discarding an untracked file deletes it from the working tree. Discarding a staged new file removes it from the index (file stays on disk as untracked).
+
+### 6. Verify and commit
 
 Check what's staged vs unstaged:
 ```bash
@@ -119,7 +145,7 @@ Then commit as usual:
 git commit -m "your message"
 ```
 
-If there are more changes to stage for a second commit, go back to step 1 — you need to re-diff because hunk IDs change after staging.
+If there are more changes to stage for a second commit, go back to step 1 — you need to re-diff because hunk IDs change after staging or checkout.
 
 ## Protocol Mode (persistent sessions)
 
@@ -131,7 +157,10 @@ gitsift protocol --repo .
 
 ```json
 {"method": "diff", "params": {"file": "src/main.rs"}}
+{"method": "diff", "params": {"staged": true}}
 {"method": "stage", "params": {"hunk_ids": ["abc123"]}}
+{"method": "checkout", "params": {"hunk_ids": ["abc123"]}}
+{"method": "checkout", "params": {"hunk_ids": ["abc123"], "staged": true}}
 {"method": "status"}
 ```
 
@@ -151,7 +180,7 @@ gitsift stage --hunk-ids <id>
 
 **Changes close together merge into one hunk.** If your modifications are within 3 lines of each other, git combines them into a single hunk. You can't split them with hunk-level staging — use line-level staging (`--from-stdin` with `line_selections`) instead. Check the hunk's `lines` array to pick exactly which delete/insert pairs to include.
 
-**Re-diff after every stage.** Once you stage something, the remaining hunks shift and their IDs change. Always run `gitsift diff` again before the next `gitsift stage`. Using stale IDs will fail with "hunk ID not found".
+**Re-diff after every stage or checkout.** Once you stage or checkout something, the remaining hunks shift and their IDs change. Always run `gitsift diff` again before the next operation. Using stale IDs will fail with "hunk ID not found".
 
 **One mode per request.** Either `hunk_ids` or `line_selections`, never both at once. The API rejects mixed requests — use separate calls if you need both.
 
@@ -181,7 +210,7 @@ git commit -m "feat: add retry logic for API calls"
 
 ## Response Format
 
-**Compact (toon) format** — default:
+**Stage result — compact (toon) format** (default):
 ```
 version: 1
 ok: true
@@ -189,9 +218,22 @@ staged: 2
 failed: 0
 ```
 
-**JSON format** — use `--format json`:
+**Stage result — JSON format** (`--format json`):
 ```json
 {"version": 1, "ok": true, "data": {"staged": 2, "failed": 0}}
+```
+
+**Checkout result — compact (toon) format** (default):
+```
+version: 1
+ok: true
+discarded: 1
+failed: 0
+```
+
+**Checkout result — JSON format** (`--format json`):
+```json
+{"version": 1, "ok": true, "data": {"discarded": 1, "failed": 0}}
 ```
 
 On error (JSON):

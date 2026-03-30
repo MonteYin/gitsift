@@ -1,5 +1,5 @@
 use crate::cli::OutputFormat;
-use crate::models::{DiffOutput, Response, StageResult, StatusSummary};
+use crate::models::{CheckoutResult, DiffOutput, Response, StageResult, StatusSummary};
 
 /// Print a value as a JSON `Response::success` envelope.
 fn print_json(data: &impl serde::Serialize) {
@@ -20,6 +20,14 @@ pub fn print_stage_result(result: &StageResult, format: &OutputFormat) {
     match format {
         OutputFormat::Json => print_json(result),
         OutputFormat::Toon => print!("{}", crate::toon::format_stage_result(result)),
+    }
+}
+
+/// Print checkout result.
+pub fn print_checkout_result(result: &CheckoutResult, format: &OutputFormat) {
+    match format {
+        OutputFormat::Json => print_json(result),
+        OutputFormat::Toon => print!("{}", crate::toon::format_checkout_result(result)),
     }
 }
 

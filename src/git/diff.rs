@@ -151,6 +151,94 @@ pub fn diff_unstaged(repo_path: &Path, file_filter: Option<&str>) -> Result<Diff
     Ok(DiffOutput { files, total_hunks })
 }
 
+/// Generate a structured diff of staged changes.
+///
+/// Compares the HEAD tree against the index (staging area).
+/// Shows what has been staged but not yet committed.
+pub fn diff_staged(repo_path: &Path, file_filter: Option<&str>) -> Result<DiffOutput> {
+    let repo = Repository::open(repo_path).context("failed to open git repository")?;
+
+    let mut opts = super::diff_opts_tracked_only();
+    if let Some(filter) = file_filter {
+        opts.pathspec(filter);
+    }
+
+    // Get HEAD tree; if no commits yet, use an empty tree
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+
+    let diff = repo
+        .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
+        .context("failed to generate staged diff")?;
+
+    let state = RefCell::new(DiffState::new());
+
+    diff.foreach(
+        &mut |delta, _progress| {
+            let mut s = state.borrow_mut();
+            s.flush_file();
+
+            if is_binary_delta(&delta) {
+                return true;
+            }
+
+            let path = delta_path(&delta);
+
+            s.current_file = Some(FileChange {
+                path,
+                status: delta_to_status(delta.status()),
+                hunks: Vec::new(),
+            });
+            true
+        },
+        None,
+        Some(&mut |_delta, hunk| {
+            let mut s = state.borrow_mut();
+            s.flush_hunk();
+
+            let file_path = s.current_file.as_ref().map_or("", |f| f.path.as_str());
+
+            let header = hunk_header(&hunk);
+
+            s.current_hunk = Some(Hunk {
+                id: hunk_id(file_path, hunk.old_start(), &header),
+                file_path: file_path.to_string(),
+                old_start: hunk.old_start(),
+                old_lines: hunk.old_lines(),
+                new_start: hunk.new_start(),
+                new_lines: hunk.new_lines(),
+                header,
+                lines: Vec::new(),
+            });
+            true
+        }),
+        Some(&mut |_delta, _hunk, line| {
+            let mut s = state.borrow_mut();
+
+            let tag = LineTag::from_origin(line.origin());
+
+            let content = String::from_utf8_lossy(line.content()).into_owned();
+
+            let hunk_line = HunkLine {
+                tag,
+                content,
+                old_lineno: line.old_lineno(),
+                new_lineno: line.new_lineno(),
+            };
+
+            if let Some(hunk) = s.current_hunk.as_mut() {
+                hunk.lines.push(hunk_line);
+            }
+            true
+        }),
+    )
+    .context("failed to iterate staged diff")?;
+
+    let files = state.into_inner().finalize();
+    let total_hunks = files.iter().map(|f| f.hunks.len()).sum();
+
+    Ok(DiffOutput { files, total_hunks })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +429,73 @@ mod tests {
 
         assert!(inserted.old_lineno.is_none(), "insert has no old line number");
         assert!(inserted.new_lineno.is_some(), "insert has new line number");
+    }
+
+    // --- diff_staged tests ---
+
+    #[test]
+    fn staged_diff_shows_staged_changes() {
+        let (dir, repo) = setup_repo();
+
+        // Modify and stage
+        fs::write(dir.path().join("hello.txt"), "line 1\nline 2 STAGED\nline 3\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("hello.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let output = diff_staged(dir.path(), None).unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "hello.txt");
+        assert_eq!(output.files[0].status, FileStatus::Modified);
+        assert!(output.total_hunks >= 1);
+    }
+
+    #[test]
+    fn staged_diff_empty_when_nothing_staged() {
+        let (dir, _repo) = setup_repo();
+
+        // Modify but don't stage
+        fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+
+        let output = diff_staged(dir.path(), None).unwrap();
+        assert_eq!(output.files.len(), 0);
+        assert_eq!(output.total_hunks, 0);
+    }
+
+    #[test]
+    fn staged_diff_with_file_filter() {
+        let (dir, repo) = setup_repo();
+
+        fs::write(dir.path().join("hello.txt"), "changed\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "new\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("hello.txt")).unwrap();
+            index.add_path(Path::new("other.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let output = diff_staged(dir.path(), Some("hello.txt")).unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "hello.txt");
+    }
+
+    #[test]
+    fn staged_diff_new_file() {
+        let (dir, repo) = setup_repo();
+
+        fs::write(dir.path().join("brand_new.txt"), "new content\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("brand_new.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let output = diff_staged(dir.path(), None).unwrap();
+        let new_file = output.files.iter().find(|f| f.path == "brand_new.txt");
+        assert!(new_file.is_some());
+        assert_eq!(new_file.unwrap().status, FileStatus::Added);
     }
 }
